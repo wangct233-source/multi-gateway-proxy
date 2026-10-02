@@ -1,0 +1,276 @@
+{
+  "schema_version": 1,
+  "configuration": {
+    "gateways": [
+      "a-cn",
+      "a-intl",
+      "b",
+      "c"
+    ],
+    "clients_per_gateway": 8,
+    "requests_per_gateway": 400,
+    "stream": false,
+    "connect_timeout_seconds": 10,
+    "idle_timeout_seconds": 60,
+    "total_timeout_seconds": 600
+  },
+  "metric_notes": {
+    "request_qps": "completed attempts divided by shared wall-clock duration; not tokens/s or SSE events/s",
+    "client_inflight_peak": "simultaneous client requests, not server/account concurrency; clients is per gateway",
+    "ttft": "first nonempty content/reasoning/refusal/tool delta; excludes role, heartbeat and usage-only events",
+    "latency": "client dispatch through response EOF/close; includes admission/queue/network time; no automatic retries",
+    "stream_success": "2xx SSE, valid JSON data frames, meaningful delta, [DONE], clean EOF, no error event",
+    "scope": "target chosen by caller; this output alone never proves provider or public-network verification"
+  },
+  "overall": {
+    "attempted_requests": 1600,
+    "successful_requests": 1599,
+    "failed_requests": 1,
+    "failure_rate": 0.000625,
+    "elapsed_seconds": 17.988568,
+    "request_qps": 88.945379,
+    "successful_request_qps": 88.889788,
+    "client_inflight_peak": 32,
+    "total_latency_ms_all": {
+      "samples": 1600,
+      "p50": 165.597,
+      "p95": 1183.62,
+      "mean": 306.962
+    },
+    "total_latency_ms_success": {
+      "samples": 1599,
+      "p50": 165.598,
+      "p95": 1183.798,
+      "mean": 307.092
+    },
+    "ttft_ms_success": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "mean": null
+    },
+    "first_body_byte_ms_all": {
+      "samples": 1599,
+      "p50": 151.919,
+      "p95": 1169.051,
+      "mean": 295.323
+    },
+    "first_data_event_ms_all": {
+      "samples": 0,
+      "p50": null,
+      "p95": null,
+      "mean": null
+    },
+    "http_status_counts": {
+      "200": 1599
+    },
+    "failure_counts": {
+      "transport_error": 1
+    },
+    "sse_raw_bytes": 0,
+    "sse_data_events": 0,
+    "sse_comment_lines": 0,
+    "sse_content_events": 0,
+    "streams_with_done": 0
+  },
+  "gateways": {
+    "a-cn": {
+      "attempted_requests": 400,
+      "successful_requests": 400,
+      "failed_requests": 0,
+      "failure_rate": 0.0,
+      "elapsed_seconds": 17.988568,
+      "request_qps": 22.236345,
+      "successful_request_qps": 22.236345,
+      "client_inflight_peak": 8,
+      "total_latency_ms_all": {
+        "samples": 400,
+        "p50": 163.872,
+        "p95": 1020.149,
+        "mean": 285.68
+      },
+      "total_latency_ms_success": {
+        "samples": 400,
+        "p50": 163.872,
+        "p95": 1020.149,
+        "mean": 285.68
+      },
+      "ttft_ms_success": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "mean": null
+      },
+      "first_body_byte_ms_all": {
+        "samples": 400,
+        "p50": 149.856,
+        "p95": 1015.297,
+        "mean": 274.217
+      },
+      "first_data_event_ms_all": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "mean": null
+      },
+      "http_status_counts": {
+        "200": 400
+      },
+      "failure_counts": {},
+      "sse_raw_bytes": 0,
+      "sse_data_events": 0,
+      "sse_comment_lines": 0,
+      "sse_content_events": 0,
+      "streams_with_done": 0
+    },
+    "a-intl": {
+      "attempted_requests": 400,
+      "successful_requests": 400,
+      "failed_requests": 0,
+      "failure_rate": 0.0,
+      "elapsed_seconds": 17.988568,
+      "request_qps": 22.236345,
+      "successful_request_qps": 22.236345,
+      "client_inflight_peak": 8,
+      "total_latency_ms_all": {
+        "samples": 400,
+        "p50": 167.442,
+        "p95": 1062.194,
+        "mean": 293.5
+      },
+      "total_latency_ms_success": {
+        "samples": 400,
+        "p50": 167.442,
+        "p95": 1062.194,
+        "mean": 293.5
+      },
+      "ttft_ms_success": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "mean": null
+      },
+      "first_body_byte_ms_all": {
+        "samples": 400,
+        "p50": 152.414,
+        "p95": 1059.595,
+        "mean": 280.772
+      },
+      "first_data_event_ms_all": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "mean": null
+      },
+      "http_status_counts": {
+        "200": 400
+      },
+      "failure_counts": {},
+      "sse_raw_bytes": 0,
+      "sse_data_events": 0,
+      "sse_comment_lines": 0,
+      "sse_content_events": 0,
+      "streams_with_done": 0
+    },
+    "b": {
+      "attempted_requests": 400,
+      "successful_requests": 400,
+      "failed_requests": 0,
+      "failure_rate": 0.0,
+      "elapsed_seconds": 17.988568,
+      "request_qps": 22.236345,
+      "successful_request_qps": 22.236345,
+      "client_inflight_peak": 8,
+      "total_latency_ms_all": {
+        "samples": 400,
+        "p50": 173.372,
+        "p95": 1228.752,
+        "mean": 334.013
+      },
+      "total_latency_ms_success": {
+        "samples": 400,
+        "p50": 173.372,
+        "p95": 1228.752,
+        "mean": 334.013
+      },
+      "ttft_ms_success": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "mean": null
+      },
+      "first_body_byte_ms_all": {
+        "samples": 400,
+        "p50": 157.56,
+        "p95": 1214.347,
+        "mean": 322.385
+      },
+      "first_data_event_ms_all": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "mean": null
+      },
+      "http_status_counts": {
+        "200": 400
+      },
+      "failure_counts": {},
+      "sse_raw_bytes": 0,
+      "sse_data_events": 0,
+      "sse_comment_lines": 0,
+      "sse_content_events": 0,
+      "streams_with_done": 0
+    },
+    "c": {
+      "attempted_requests": 400,
+      "successful_requests": 399,
+      "failed_requests": 1,
+      "failure_rate": 0.0025,
+      "elapsed_seconds": 17.988568,
+      "request_qps": 22.236345,
+      "successful_request_qps": 22.180754,
+      "client_inflight_peak": 8,
+      "total_latency_ms_all": {
+        "samples": 400,
+        "p50": 158.948,
+        "p95": 1240.033,
+        "mean": 314.655
+      },
+      "total_latency_ms_success": {
+        "samples": 399,
+        "p50": 158.976,
+        "p95": 1241.472,
+        "mean": 315.197
+      },
+      "ttft_ms_success": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "mean": null
+      },
+      "first_body_byte_ms_all": {
+        "samples": 399,
+        "p50": 146.959,
+        "p95": 1227.937,
+        "mean": 303.94
+      },
+      "first_data_event_ms_all": {
+        "samples": 0,
+        "p50": null,
+        "p95": null,
+        "mean": null
+      },
+      "http_status_counts": {
+        "200": 399
+      },
+      "failure_counts": {
+        "transport_error": 1
+      },
+      "sse_raw_bytes": 0,
+      "sse_data_events": 0,
+      "sse_comment_lines": 0,
+      "sse_content_events": 0,
+      "streams_with_done": 0
+    }
+  }
+}

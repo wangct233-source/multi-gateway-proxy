@@ -1,0 +1,39 @@
+# Runtime credentials and mutable state must never enter an image layer.
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+**/.venv
+**/venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/node_modules
+/data
+/logs
+/runtime
+/backups
+/benchmark-results
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite3-wal
+**/*.sqlite3-shm
+**/*.pem
+**/*.key
+**/id_rsa*
+**/id_ed25519*
+**/credentials*
+**/*secret*
+**/*deploy_key*
+**/backend_deploy*
+**/*.log
+# Audit any additional paths before building. Ignore rules are not secret scanning.
+# Deliberately do NOT ignore .git: supervisor updates need the committed main repo.
+# Git metadata must contain no embedded credentials or secret historical blobs.

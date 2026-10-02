@@ -1,0 +1,5 @@
+starlette==0.48.0
+uvicorn==0.35.0
+httpx[socks]==0.28.1
+psutil==7.0.0
+websockets==15.0.1

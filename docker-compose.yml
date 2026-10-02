@@ -1,0 +1,67 @@
+services:
+  app:
+    # MGP_IMAGE picks the running image (set by the host update script, e.g.
+    # ghcr.io/owner/multi-gateway-proxy:sha-<full-commit>). Unset builds locally.
+    image: ${MGP_IMAGE:-multi-gateway-proxy:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    command: ["python", "-m", "app.supervisor"]
+    user: "10001:10001"
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - type: bind
+        source: ./data
+        target: /app/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./logs
+        target: /app/logs
+        bind:
+          create_host_path: false
+      # Only this explicitly selected SSH key directory, never ~/.config/gh or gh auth.
+      # DEPLOY_KEY_DIR=./runtime/keys is the configuration example; deployment overrides
+      # it to ../runtime/keys so the actual mount is outside this source repository.
+      - type: bind
+        source: ${DEPLOY_KEY_DIR:-../runtime/keys}
+        target: /app/runtime/keys
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      # Host path selects the mount; the supervisor sees the container path instead.
+      DEPLOY_KEY_DIR: /app/runtime/keys
+    mem_reservation: ${MEM_RESERVATION:-256m}
+    mem_limit: ${MEM_LIMIT:-512m}
+    cpus: "${CPU_LIMIT:-2.0}"
+    deploy:
+      resources:
+        limits:
+          cpus: "${CPU_LIMIT:-2.0}"
+          memory: ${MEM_LIMIT:-512m}
+        reservations:
+          memory: ${MEM_RESERVATION:-256m}
+    restart: unless-stopped
+    stop_grace_period: 620s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3); assert r.status == 200"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,88 @@
+﻿# 实测与未完成项 · 2026-10-02
+
+## 范围
+
+用户授权服务器容器下部署测试。独立目录 `/opt/multi-gateway-proxy-test-20261002`，Compose project `mgp-test`，端口仅127.0.0.1:8000，未修改面板/nginx/firewalld/Docker daemon。UI仍本机纯静态。服务器2CPU、约1.8GiB内存、Docker26.1.4/Compose2.27.1、vfs；Python容器3.12.15、UID10001。
+
+四逻辑网关全以显式OpenAI-compatible fixture测试，各4个测试账号，各8槽、账号2槽，各队列32等待15s。四不同loopback HTTP代理端口一一绑定；G1另有本网关备用。**不是四个独立公网IP；没有真实厂商账号/调用/签到/奖励操作。** fixture和benchmark后续各用独立临时容器，只有app是正式部署服务；它们不是生产依赖。
+
+## 正确性
+
+- 核心最终10项unittest：本机3.14.5与云端3.12.15全部PASS；新增批次内错误写入不回滚无关项、内部Token不得引用为上游凭据；队列满/超时/取消、账号gateway复合隔离、幂等release、字节跨块UTF8、断连、慢客户端总期限、URL拼接/凭据替换、HMAC/config fail-closed。
+- container_acceptance.py：23项PASS；4路同时流式中文/工具/心跳/DONE、管理鉴权、四路任务501与dryrun禁止执行、总杀开关、CORS精确预检、queue满429不影响其他网关、断连release、账号PATCH隔离、SQLite WAL/FK。
+- egress_acceptance.py：主出口连接失败只选自身backup，backup risk hold后不借用B出口，空primary不能使用backup，其他gateway unaffected，PASS。
+- runtime_acceptance.py：人为压低内存软目标后429准入拒绝/有效并发减半、同端口WS握手501、ADMIN_TOKEN上游引用拒绝，PASS。
+- 重建测试夹具时曾绑定旧容器network ID无法启动，已仅重建命名fixture修复；应用首轮检测早于下一次出口health而503，等待正常探测后完整复验PASS。最终构建保留所有跟踪文件，工作树干净；不将这些环境失败隐藏。
+- update_acceptance.py：一次性本地Git副本在途SSE完整结束，候选应用，同supervisor PID，非法候选回滚，.env保留，PASS。GitHub远端传输未测。
+
+## GitHub 热更新实测（2026-10-02，新增）
+
+前置：gh CLI 本机/服务器均缺失；经用户授权改用 GitHub REST API + 本机凭据管理器已存令牌（身份核验 wangct233-source，OAuth scopes: gist, repo, workflow）。令牌只在本机变量与请求头中使用，未打印、未入 Git/镜像/聊天。
+
+- 建仓：`wangct233-source/multi-gateway-proxy`（private）与 `wangct233-source/multi-gateway-proxy-ui`（public），201；名称预检 404 后创建；本地 main 分别推送（fb08c67 / c5ed0c2），ls-remote 与本地一致。推送前审查 tracked 文件与全历史，未发现密钥/服务器 IP/密码模式。
+- 只读 deploy key：ed25519（`multi-gateway-readonly`，指纹 KEKm1UjxsWkAuxk7/gZqNuGj2QrBquRpeVoaM05XVJI）生成于仓库外 `runtime/keys/`（.gitignore 已排除），API 注册 read_only=true（id=165158934）。SFTP 上传云端 `/opt/runtime/keys/`（600，属主10001），三文件 md5 双端一致。
+- known_hosts：GitHub 主机公钥取自官方 `api.github.com/meta`，指纹与官方文档页三算法（Ed25519/ECDSA/RSA）交叉核验一致后写入；本机经 ssh.github.com:443 验证 key 被接受（GitHub 以仓库名身份应答）。本机 github.com:22 不通，云端 22/443/api 实测均通。
+- 云端配置：容器与宿主机源码目录 origin 均指向 `git@github.com:wangct233-source/multi-gateway-proxy.git`；`.env` 增改 `UPDATES_ENABLED=true`、`UPDATES_REPO_SLUG=wangct233-source/multi-gateway-proxy`；容器重建（RestartCount 归零，资源限制/compose 不变）后重建共享网络命名空间的命名 fixture 容器。
+- 预检：容器内以 updater 同款 GIT_SSH_COMMAND fetch 私有仓成功（FETCH_HEAD=fb08c67），工作树 clean，requirements 与运行版一致（ecb938d..fb08c67 仅 docs）。
+- **更新实测**：POST /api/updates/check → pending(ecb938d→fb08c67) → **applied**；`/healthz` 200；容器 RestartCount=0（supervisor 仅重启 worker，容器未重建）；容器 HEAD=fb08c67。
+- **坏候选回滚实测**：推送含语法错误的提交 0b72626 → pending → draining → **rolled_back**（last_error=candidate_failed）；容器代码自动恢复 fb08c67，healthz 200，零容器重启。
+- **恢复更新实测**：revert 提交 214a45c → **applied**；healthz 200；更新后非流式 200 + 流式 SSE 至 `[DONE]` 业务冒烟通过。
+- 边界：webhook 未配置（无公网 HTTPS 回调地址，PUBLIC_BACKEND_URL 空），线上更新依赖 300s 轮询，已实测；公网 webhook 交付仍未测。UI 公共仓匿名 `git ls-remote` 可读；GitHub Release 未发布（UI 启动匿名 Release 检查代码在，真实 Release 路径仍未测）。
+
+## 两步式更新与服务器托管 UI（2026-10-02，新增）
+
+**两步式热更新（后端 9a3dd20）**：`UPDATES_AUTO_APPLY` 默认 false。云端实测：push 提交 7ce76f8 → `POST /api/updates/check` 返回 state=**available**（含 previous/candidate/提交说明），等待 4 秒状态不变、worker HEAD 不变、healthz 200——supervisor 正确忽略 available；`GET /api/updates/apply` 405。本机 `scripts/update_acceptance.py` 扩展后全绿：在途 slow SSE 在排空中完整走完 `[DONE]`（Windows 端 supervisor 改用 CTRL_BREAK 触发 uvicorn 优雅停机，Linux SIGTERM 路径不变）、候选应用、坏候选回滚、.env 保留、**available 状态不自动应用**、apply 端点未带令牌 401、不受信来源 apply fail-closed（state=failed 而非 pending）。单测 11 项全过（新增 apply 状态机测试：available→apply→pending、pending 期间 check 不重拉、up_to_date 不武装、auto_apply=true 直达 pending、校验失败→failed）。
+
+**服务器托管 UI（用户选定方案 A）**：静态 UI（4 个公开文件，无密钥）上传至 `/opt/multi-gateway-proxy-ui-static`；nginx 原装默认配置增加一行 vhost include + 独立 vhost `mgp-ui.conf`（监听 18443 ssl，自签证书 CN=IP，静态根 + `/api|/healthz` 同源反代 127.0.0.1:8000，`proxy_buffering off`、read/send timeout 700s）；`/gw` 数据面**未**对公网开放（管理令牌曾在聊天中出现，待轮换后再议）。防火墙仅新增 18443/tcp，既有端口未动；改动前 nginx.conf 与 vhost 列表备份至 `/root/_mgp_ui_nginx_backup_*`；首次因 CentOS7 openssl 无 `-addext` 生成证书失败，nginx -t 失败后脚本按设计自动撤下 vhost，修正后 nginx -t 通过并 reload。实测：本机 curl `https://127.0.0.1:18443/` UI=200、`/healthz`=200、无令牌 `/api`=401；公网 `https://<your-server-ip>:18443/` UI=200 且返回新版更新卡片。UI 同源模式：BaseURL 留空即用当前页面地址（app.js 同源回退）。浏览器端到端点击验收：机器人测试被用户接管——用户本人于公网打开 https://<your-server-ip>:18443/ 确认页面正常加载（"正常"）；连接后首次「立即更新」点击由用户完成，apply 链路已有 API 级与本机 E2E 证据，此处不代称已验收。
+
+## 账号体系与 CodeBuddy 直连（2026-10-02，新增）
+
+**G1/G2 真实上游直连（a99100a）**：适配器按官方桌面客户端协议补齐出站身份（Bearer + X-User-Id + X-Machine-ID/X-Session-ID 由 uid 稳定派生 + X-IDE-Type/Version/Product + X-Domain + UA/Origin/Referer/Accept-Language 分 realm；来源 wb_identity.py:76-105、wb_accounts.py:449-504、wb_fingerprint.py:11-24）。uid 优先从 access token JWT sub 提取。云端 .env 切换 A_CN→https://copilot.tencent.com、A_INTL→https://www.workbuddy.ai（mode=a、direct://local 出网）；实测请求真实到达腾讯 APISIX 网关返回 401（fixture 假 token 的预期响应）——链路通，待真实账号。工具配对修复前带 tools 请求仍 501（含 `tools:[]` 空数组的边界已修复为按键存在性判断）。
+
+**账号登录链接 + 四格式导入（383a7c1）**：DB v2 幂等迁移（accounts 加 secret_inline 列，user_version 保持 1 保证回滚后旧代码可启动；实测老库自动升级）。`POST /api/v1/gateways/{id}/accounts/login-link` 真实调用腾讯 `/v2/plugin/auth/state` 成功返回 state+authUrl（实测 state=46649bfb…、10 分钟有效）；`GET …/login-status` 轮询 `/v2/plugin/auth/token`（code=11217 pending/0 取 accessToken 入库）。`POST …/accounts/import` 自动识别 A/A2（扁平 accessToken 与嵌套 auth/account）、B（token/user_id）、C（apiKey+secret 拼接、userId）及裸字符串四种格式，实测三格式各 1 项全部 imported；凭据跨网关复用仍被拒绝；secret_inline 永不出现在 API 响应（public_accounts 仅显示 source=imported/env）。单测 13 项全过。UI 账号页重做：删除手动 env 引用表单，改为「生成登录链接（仅 G1/G2）」+「导入 JSON 文件/粘贴」（多文件、数组/单对象、≤100 项），登录状态 3 秒自动轮询。本轮热更新实测：check→available→apply→applied→HEAD=383a7c1、healthz 200、schema 自动迁移，测试导入数据已清理。
+
+## 性能（实测，非容量承诺）
+
+| 负载 | 总请求 | 客户端在途峰值 | 总QPS | 总延迟p50/p95 ms | 失败率 |
+|---|---:|---:|---:|---:|---:|
+| 首轮SSE（所有测试进程同容器，污染资源统计） |800|32|74.283|178.850 / 1210.093|0%|
+| 隔离fixture与压测器SSE |1600|32|54.735|322.916 / 1537.307|0%|
+| 隔离短请求首轮 |1600|32|88.945|165.597 / 1183.620|0.0625%（1个transport_error，原因未定位）|
+| 隔离短请求复测 |1600|32|73.368|224.189 / 1425.501|0%|
+| 最终ecb938d镜像SSE复验 |1600|32|59.434|314.941 / 1436.126|0.0625%（1个ReadError）|
+
+短请求首轮失败不被复测抹去；旧分类没有异常子类信息，已加类型统计。最终SSE也出现一次ReadError，HTTP状态尚未收到；app无对应异常、容器restart=0，无足够证据区分客户端keepalive竞态、测试代理或服务端问题，根因未解决。不改资源/daemon来猜修。所有数据受同一2CPU主机上fixture/压测器竞争影响，非真实上游QPS，未证明长期大量并发容量。原始JSON在[measurements](measurements/)。
+
+隔离SSE逐网关（每路400请求）：
+
+| 网关 | QPS | p50 ms | p95 ms | TTFT p95 ms | 失败 |
+|---|---:|---:|---:|---:|---:|
+|a-cn|13.684|330.863|1502.185|1451.262|0|
+|a-intl|13.684|332.848|1484.175|1406.373|0|
+|b|13.684|310.747|1493.063|1378.171|0|
+|c|13.684|317.479|1863.615|1812.481|0|
+
+## docker stats（真实抽样）
+
+独立fixture后端容器：空闲58.3–64.1MiB，CPU0.33–0.83%；SSE压力59.3–75.55MiB，CPU53.91–114%；短请求压力64.25–64.77MiB，CPU47.86–94.10%。采样峰值不是瞬时绝对峰值。114%表示约1.14CPU，并非超出2CPU安全阀。
+
+首轮将fixture/benchmark混进app：最高98.66MiB、197.24%CPU，已明确排除为纯后端资源指标。最终ecb938d镜像为227,331,421字节（227.33MB，216.80MiB），小于250MB；最终SSE后端压力66.97–82.35MiB，CPU50.43–108.03%，结束后72.23MiB、0.42%。cgroup核实reservation268435456、limit536870912、2CPU；UID10001，运行repo干净，restart=0。镜像内部.env/数据库/gh_auth/deploy私钥均不存在，GH_TOKEN/GITHUB_TOKEN env不存在。
+
+服务器vfs使镜像层实际磁盘膨胀：根分区从3.2G涨至7.5G、剩余5.6G；未使用全局prune、未更改存储驱动。保留已验收镜像和源码回滚备份，后续部署需注意容量。
+
+建议保留并发8起步，queue32、timeout15。256MB软预留/512MB阀在fixture下充足；CPU已接近单核，不建议盲目加并发。调到12/16前应补真实上游长流、慢消费者、30min soak和限流/风控统计。软水位针对HTTP worker RSS，非完整cgroup内存，SQLite pagecache/supervisor需安全阀兜底。
+
+## 缺口（不是已完成）
+
+1. G1/G2仅通用Chat适配；原Responses/完整工具修复/ACP/自动refresh、A2成本加权/完整任务中心尚未移植。
+2. B Remote、C native签名/工具转换未接通；证据不足路径501。C完整许可、B第三方来源许可仍待补齐；不复制身份/验证码绕过代码。
+3. 入站同端口识别WebSocket但正常代理未实现，握手前501，未宣传WS支持。
+4. 四公网IP、HTTPS/SOCKS5实际出口及真实账号协议未测，只有loopback HTTP故障切换验证。
+5. ~~GitHub repo/private deploy key/webhook未创建~~（2026-10-02 部分闭环）：两仓库已创建并推送、只读 deploy key 已注册并实测拉取、热更新/回滚云端实测通过；webhook 仍未配置（无公网 HTTPS 回调），gh CLI 仍缺失（本轮以 REST API + 本机凭据管理器令牌完成，未向用户索要聊天 token）。
+6. 公网HTTPS回调地址未提供；HMAC webhook代码与300s轮询均已实测（轮询路径真实触发），webhook公网交付仍无虚构配置。UI 公共仓已建，GitHub Release 未发布。
+7. 签到执行器A-CN/B仅源码参考且显式verified后可用，默认未启用；领取/国际活跃仍501；无真实业务验收。
+8. alert目前结构化日志+API故障状态，无外部邮件/通知服务。
+
+## 回滚
+
+停止测试fixture仅停止命名容器mgp-test-fixture；主服务停止用`docker compose -p mgp-test stop app`，不删data。需要回滚源码使用已提交commit重建，先在线SQLite backup；不改服务器全局服务，不docker system prune。密钥/.env隔离、gh写凭据从未挂到镜像/容器。
