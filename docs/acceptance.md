@@ -41,6 +41,12 @@
 
 **账号登录链接 + 四格式导入（383a7c1）**：DB v2 幂等迁移（accounts 加 secret_inline 列，user_version 保持 1 保证回滚后旧代码可启动；实测老库自动升级）。`POST /api/v1/gateways/{id}/accounts/login-link` 真实调用腾讯 `/v2/plugin/auth/state` 成功返回 state+authUrl（实测 state=46649bfb…、10 分钟有效）；`GET …/login-status` 轮询 `/v2/plugin/auth/token`（code=11217 pending/0 取 accessToken 入库）。`POST …/accounts/import` 自动识别 A/A2（扁平 accessToken 与嵌套 auth/account）、B（token/user_id）、C（apiKey+secret 拼接、userId）及裸字符串四种格式，实测三格式各 1 项全部 imported；凭据跨网关复用仍被拒绝；secret_inline 永不出现在 API 响应（public_accounts 仅显示 source=imported/env）。单测 13 项全过。UI 账号页重做：删除手动 env 引用表单，改为「生成登录链接（仅 G1/G2）」+「导入 JSON 文件/粘贴」（多文件、数组/单对象、≤100 项），登录状态 3 秒自动轮询。本轮热更新实测：check→available→apply→applied→HEAD=383a7c1、healthz 200、schema 自动迁移，测试导入数据已清理。
 
+## 镜像模式热更新与开源（2026-10-02，新增）
+
+**开源**：仓库 wangct233-source/multi-gateway-proxy 已转公开（0569de0 起 Git 历史重写为单一干净提交，旧历史中服务器 IP 不再对外可见）；新增 MIT LICENSE、README 使用须知（上游服务条款风险提示，同 sub2api 做法）。UI 仓保持公开。
+
+**镜像级自动更新（替代源码热更新）**：GitHub Actions 在每次 main push 后自动构建完整镜像并发布 ghcr.io（tags: sha-<full-commit> 与 latest），依赖全部打进镜像——requirements.txt 变化不再阻断更新。容器内 updater 改为镜像模式：check 经公开 GitHub API 比对远端 main；apply 向数据卷写 image-update-request.json；宿主机 cron 脚本（每分钟，flock 防重叠）拉取对应 sha 镜像 → 写 .env MGP_IMAGE → compose 重建（docker stop 620s 宽限内 supervisor 优雅排空在途流）→ 健康检查 → 成功写 image-update-status.json 并自动清理旧镜像（保留 2 个），失败自动回退上一个镜像。云端实测：CI 构建成功（run 37029891837）、ghcr 匿名拉取通过、容器切换至 ghcr 镜像 0569de0、check=up_to_date、fixture 与真实上游冒烟正常。单测 13 项全过（apply 死锁修复：锁内复检改用 _check_locked）。首次部署踩坑记录：宿主机源码目录停在 ecb938d 旧 compose（硬编码镜像名）导致切换无效，已从镜像内提取新 compose 修复——镜像模式下宿主机只需 compose 文件与 .env。
+
 ## 性能（实测，非容量承诺）
 
 | 负载 | 总请求 | 客户端在途峰值 | 总QPS | 总延迟p50/p95 ms | 失败率 |
