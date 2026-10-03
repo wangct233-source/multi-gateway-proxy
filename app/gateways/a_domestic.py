@@ -80,3 +80,37 @@ class DomesticAdapter(GatewayAdapter):
     def prepare(self, path, payload, lease):
         path, data = self._validated_payload(path, payload)
         return upstream_url(self.config.upstream_url, path), self.identity_headers(lease), data
+
+
+# 刷新协议（wb_accounts.py:525-565 同构）：轮换式 refreshToken，必须串行。
+REFRESH_PATH = "v2/plugin/auth/token/refresh"
+_REFRESH_LOCKS: dict[str, "asyncio.Lock"] = {}
+
+
+def refresh_lock(account_key: str) -> "asyncio.Lock":
+    import asyncio
+    lock = _REFRESH_LOCKS.get(account_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _REFRESH_LOCKS[account_key] = lock
+    return lock
+
+
+def refresh_request(base_url: str, realm: str, refresh_token: str, uid: str) -> tuple[str, dict, dict]:
+    """构造 token 刷新请求：(url, headers, body)。响应 data 含轮换后的 accessToken/refreshToken。"""
+    cfg = REALMS[realm]
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": cfg["user_agent"],
+        "Origin": cfg["origin"],
+        "Referer": cfg["origin"] + "/",
+        "X-Refresh-Token": refresh_token,
+        "X-Auth-Refresh-Source": "workbuddy" if realm == "cn" else "plugin",
+        "X-User-Id": uid or "anonymous",
+        "X-Domain": cfg["domain"],
+        "X-CodeBuddy-Request": "1",
+        "Accept-Language": cfg["language"],
+    }
+    return upstream_url(base_url, REFRESH_PATH), headers, {}

@@ -47,14 +47,25 @@ class Runtime:
         from .gateways.c import CAdapter
         self.adapter = {"a-cn": DomesticAdapter, "a-intl": InternationalAdapter, "b": BAdapter, "c": CAdapter}[cfg.id](cfg)
         self.last_error = None
+        # 模型级冷却（热状态）：{model_name: epoch_until}。6004/3009 语义来自
+        # 各网关的 risk 策略，冷却对象是模型而非账号。
+        self.model_cooldown = {}
+        self.refresh_locks = {}
+
+    def model_cooling(self, model: str) -> float:
+        until = self.model_cooldown.get(model, 0)
+        return max(0.0, until - time.time())
 
     def public(self):
+        cooling = sorted((m, int(until - time.time())) for m, until in self.model_cooldown.items()
+                         if until > time.time())
         return {"id": self.config.id, "name": self.config.name,
                 "status": "ready" if any(e.healthy for e in self.egress.exits) else "paused",
                 "concurrency": self.config.concurrency, "effective_concurrency": self.gate.limit,
                 "active": self.gate.active, "queued": self.gate.queued, "queue_limit": self.gate.queue_limit,
                 "accounts": len(self.pool.accounts), "egress": self.egress.public(),
                 "capabilities": self.adapter.capabilities(), "tasks_enabled": self.config.tasks_enabled,
+                "model_cooldowns": cooling,
                 "last_error": self.last_error or self.egress.last_error}
 
 
@@ -160,6 +171,79 @@ def authorized(request, tokens):
     return bool(supplied) and any(hmac.compare_digest(supplied.encode(), value.encode()) for value in tokens)
 
 
+async def apply_risk(state, runtime, lease, exit_, status: int, body: bytes,
+                     model: str, retry_after: float | None = None) -> str:
+    """按本网关专属策略处置上游错误，返回策略原因（空=无动作）。"""
+    from . import risk
+    policy = risk.policy_for(runtime.config.id)
+    error_code, message = policy.extract_error(body)
+    action = policy.classify(status, error_code, message, retry_after=retry_after)
+    if not (action.account_cooldown or action.model_cooldown or action.egress_cooldown or action.disable_account):
+        return ""
+    if action.model_cooldown and model:
+        runtime.model_cooldown[model] = time.time() + action.model_cooldown
+    if exit_ is not None and action.egress_cooldown:
+        await runtime.egress.fail(exit_, reason=f"risk:{action.reason}", duration=action.egress_cooldown)
+    if lease is not None and (action.account_cooldown or action.disable_account):
+        await runtime.pool.apply_action(lease, account_cooldown=action.account_cooldown,
+                                        disable=action.disable_account, reason=action.reason)
+    log.warning("gateway=%s risk action=%s code=%s status=%s", runtime.config.id,
+                action.reason, error_code or "-", status)
+    return action.reason
+
+
+async def maybe_refresh_token(runtime, exit_, lease):
+    """A 模式 token 临近过期时提前刷新（5 分钟缓冲，轮换锁串行）。
+
+    刷新成功返回新 token；无 refresh_inline 或失败返回 None（走 401 冷却路径）。
+    """
+    if runtime.config.mode != "a" or not runtime.config.upstream_url:
+        return None
+    token = lease.token
+    expires = _jwt_exp(token)
+    if expires is None or expires - time.time() > 300:
+        return None
+    account = lease.account
+    refresh = account.get("refresh_inline") or ""
+    if not refresh:
+        return None
+    from .gateways.a_domestic import refresh_lock, refresh_request, _jwt_sub
+    key = f"{runtime.config.id}:{account['id']}"
+    async with refresh_lock(key):
+        # 双检：等锁期间可能已被并发刷新。
+        if _jwt_exp(lease.token) and _jwt_exp(lease.token) - time.time() > 300:
+            return lease.token
+        url, headers, body = refresh_request(runtime.config.upstream_url, "cn" if runtime.config.id == "a-cn" else "intl",
+                                             refresh, _jwt_sub(token) or account.get("provider_account_id") or "")
+        try:
+            response = await exit_.client.post(url, json=body, headers=headers, timeout=30)
+            data = (response.json() or {}).get("data") or {}
+        except (httpx.HTTPError, ValueError):
+            return None
+        new_token = str(data.get("accessToken") or "")
+        if not new_token:
+            return None
+        new_refresh = str(data.get("refreshToken") or refresh)
+        await runtime.repository.update_credentials(runtime.config.id, account["id"], new_token, new_refresh)
+        await runtime.pool.load()
+        lease.token = new_token
+        lease.account = dict(lease.account, secret_inline=new_token, refresh_inline=new_refresh)
+        log.info("gateway=%s account=%s token refreshed", runtime.config.id, account["id"])
+        return new_token
+
+
+def _jwt_exp(token: str) -> float | None:
+    try:
+        segment = token.split(".")[1]
+        segment += "=" * (-len(segment) % 4)
+        import base64
+        claims = json.loads(base64.urlsafe_b64decode(segment))
+        value = claims.get("exp")
+        return float(value) if value else None
+    except Exception:
+        return None
+
+
 def admin(request):
     return authorized(request, (request.app.state.runtime.config.admin_token,))
 
@@ -210,6 +294,13 @@ async def proxy(request: Request):
             raise ValueError("JSON object required")
     except (ValueError, json.JSONDecodeError):
         return error(400, "invalid_request", "Invalid or oversized JSON request")
+    model = str(payload.get("model") or "")
+    cooling = runtime.model_cooling(model)
+    if cooling > 0:
+        # 模型级冷却（如 6004/3009）：只拒该模型，账号与网关不受影响。
+        return JSONResponse({"error": {"code": "model_cooldown", "message": "Model is cooling down; retry later",
+                                       "retry_after": int(cooling + 1)}}, status_code=429,
+                            headers={"Retry-After": str(int(cooling + 1))})
     exit = await runtime.egress.select()
     if not exit:
         return error(503, "no_healthy_egress", "Gateway paused; primary and own backup unavailable")
@@ -254,6 +345,8 @@ async def proxy(request: Request):
         if not lease:
             return error(429, "no_account_capacity", "No enabled account with credential and available lease")
         adapter_protocol = getattr(runtime.adapter, "protocol", "")
+        # A 模式 token 临近过期（<5min）时提前刷新，避免请求打到上游才吃 401。
+        await maybe_refresh_token(runtime, exit, lease)
         if adapter_protocol == "b-remote":
             # G3 两步会话协议：create_session(JSON) → events(SSE) → OpenAI 流。
             url, headers, data = runtime.adapter.session_request(payload, lease)
@@ -262,9 +355,10 @@ async def proxy(request: Request):
                 session_response = await exit.client.send(outbound)
             if session_response.status_code >= 400:
                 code = session_response.status_code
-                await runtime.pool.report(lease, code)
                 raw = await session_response.aread()
                 await session_response.aclose()
+                await apply_risk(state, runtime, lease, exit, code, raw[:65536], model)
+                await runtime.pool.report(lease, code)
                 return error(502, "upstream_session_failed",
                              "Trae session creation failed", upstream_status=code,
                              detail=raw[:300].decode("utf-8", errors="replace"))
@@ -285,10 +379,11 @@ async def proxy(request: Request):
             if events_response.status_code >= 400:
                 raw = await events_response.aread()
                 await events_response.aclose()
+                await apply_risk(state, runtime, lease, exit, code, raw[:65536], model)
+                await runtime.pool.report(lease, code)
                 return error(502, "upstream_events_failed", "Trae event stream failed", upstream_status=code,
                              detail=raw[:300].decode("utf-8", errors="replace"))
             source = b_protocol.parse_event_frames(events_response)
-            model = str(payload.get("model") or "auto")
             if not payload.get("stream"):
                 # 非流式：网关侧消费事件流（有界）合成 OpenAI JSON。
                 try:
@@ -318,16 +413,22 @@ async def proxy(request: Request):
                     return error(503, "egress_connect_failed", "Own egress unavailable")
                 exit = alternate
         code = response.status_code
+        if code >= 400:
+            # 统一错误分类：按本网关策略处置（账号/模型/出口冷却或停用）。
+            raw_err = await response.aread()
+            await response.aclose()
+            try:
+                retry_after = float(response.headers.get("Retry-After") or 0) or None
+            except ValueError:
+                retry_after = None
+            await apply_risk(state, runtime, lease, exit, code, raw_err[:65536], model, retry_after)
+            await runtime.pool.report(lease, code)
+            await cleanup("upstream_error")
+            return Response(content=raw_err[:65536], status_code=code,
+                            media_type=response.headers.get("content-type", "application/json"))
         await runtime.pool.report(lease, code)
         if adapter_protocol == "c-anthropic":
             # G4：Anthropic 请求/响应双向转换；流式逐事件翻译，不整包缓冲。
-            model = str(payload.get("model") or "")
-            if response.status_code >= 400:
-                raw = await response.aread()
-                await response.aclose()
-                await cleanup("upstream_error")
-                return Response(content=raw, status_code=code,
-                                media_type=response.headers.get("content-type", "application/json"))
             if payload.get("stream"):
                 stream = c_protocol.anthropic_sse_to_openai(response.aiter_raw(), model)
                 transformed = GeneratorResponse(stream, cleanup, state.config.stream_total, state.config.stream_idle)
@@ -460,17 +561,19 @@ async def management(request):
 
 
 def _extract_credential(item):
-    """把 A/A2/B/C 四种账号池格式统一提取为 (token, uid, meta)。"""
+    """把 A/A2/B/C 四种账号池格式统一提取为 (token, uid, meta, refresh)。"""
     from .gateways.a_domestic import _jwt_sub
     if isinstance(item, str):
         token = item.strip()
-        return token, _jwt_sub(token) or token[:8], {}
+        return token, _jwt_sub(token) or token[:8], {}, ""
     if not isinstance(item, dict):
         raise ValueError("unsupported account item")
     meta = {}
     # A/A2 格式：扁平 accessToken 或嵌套 {auth:{accessToken}, account:{uid,nickname}}。
     auth = item.get("auth") if isinstance(item.get("auth"), dict) else item
     token = str(auth.get("accessToken") or auth.get("access_token") or item.get("token") or "")
+    refresh = str((auth.get("refreshToken") if auth is not item else item.get("refreshToken"))
+                  or item.get("refresh_token") or "")
     if token:
         uid = str((item.get("account") or {}).get("uid") or item.get("uid") or item.get("user_id")
                   or _jwt_sub(token) or token[:8])
@@ -482,7 +585,7 @@ def _extract_credential(item):
         expires = item.get("expiresAt") or (auth.get("expiresAt") if auth is not item else None)
         if expires:
             meta["expires_at"] = expires
-        return token, uid, meta
+        return token, uid, meta, refresh[:16384]
     # C（Zcode）格式：{apiKey, secret?, userId?}；Z.AI 需要 apiKey.secret 拼接。
     api_key = str(item.get("apiKey") or item.get("api_key") or "")
     if api_key:
@@ -491,7 +594,7 @@ def _extract_credential(item):
         uid = str(item.get("userId") or item.get("user_id") or api_key[:8])
         if item.get("provider"):
             meta["provider"] = str(item["provider"])[:32]
-        return token, uid, meta
+        return token, uid, meta, ""
     raise ValueError("no recognized credential field (accessToken/token/apiKey)")
 
 
@@ -513,11 +616,11 @@ async def account_import(request):
     imported, skipped, failed = 0, 0, []
     for index, item in enumerate(items):
         try:
-            token, uid, meta = _extract_credential(item)
+            token, uid, meta, refresh = _extract_credential(item)
             meta.setdefault("source", "import")
             await state.repository.add_account(gid, {
                 "id": f"imported-{uid[:24]}-{index}", "provider_account_id": uid[:256],
-                "secret_inline": token, "enabled": True, "metadata": meta})
+                "secret_inline": token, "refresh_inline": refresh, "enabled": True, "metadata": meta})
             imported += 1
         except ValueError as exc:
             skipped += 1
@@ -640,6 +743,43 @@ async def kill_switch(request):
     return JSONResponse({"enabled": state.tasks.kill_switch})
 
 
+async def batch_run(request):
+    """一键批量任务：跨网关逐个执行（各网关用各自的策略间隔与门禁）。
+
+    每个网关仍受 kill switch / 任务开关 / 窗口 / 每日限额 / 证据门禁约束；
+    缺证据的网关返回 evidence_required 而不是静默跳过。
+    """
+    state = request.app.state.runtime
+    if not admin(request):
+        return error(401, "unauthorized", "Admin Token required")
+    if state.tasks.kill_switch:
+        return error(403, "task_blocked", "Global kill switch is on", reasons=["global_kill_switch"])
+    try:
+        body = await limited_json(request, 8192)
+        kind = str((body or {}).get("task_type") or "checkin")
+        gids = (body or {}).get("gateways")
+    except (ValueError, AttributeError):
+        return error(400, "invalid_request", "JSON object required")
+    if kind not in {"checkin", "claim", "activity"}:
+        return error(404, "not_found", "Unknown task")
+    targets = list(gids) if isinstance(gids, list) and gids else list(state.runtimes)
+    if any(g not in state.runtimes for g in targets):
+        return error(404, "gateway_not_found", "Unknown gateway in list")
+    results = {}
+    for gid in targets:
+        if kind != "checkin":
+            results[gid] = {"executed": False, "status": "evidence_required",
+                            "missing_evidence": ["Only checkin executors exist; claim/activity remain 501"]}
+            continue
+        try:
+            results[gid] = await state.checkin.execute(gid)
+        except Exception:
+            results[gid] = {"executed": False, "status": "failed", "error_class": "internal"}
+    executed = sum(1 for r in results.values() if r.get("executed"))
+    return JSONResponse({"task_type": kind, "gateways": targets, "executed_gateways": executed,
+                         "results": results})
+
+
 async def update_route(request):
     state = request.app.state.runtime
     action = request.path_params["action"]
@@ -705,6 +845,7 @@ def create_app(config=None):
         Route("/api/v1/gateways/{gateway_id}/accounts/{account_id}", management, methods=["PATCH"], name="accounts"),
         Route("/api/v1/gateways/{gateway_id}/{resource}", management, methods=["GET", "POST", "PATCH"]),
         Route("/api/v1/tasks/kill-switch", kill_switch, methods=["GET", "POST"]),
+        Route("/api/v1/tasks/batch-run", batch_run, methods=["POST"]),
         Route("/api/v1/version", version),
         Route("/api/updates/{action}", update_route, methods=["GET", "POST"]),
         Route("/gw/{gateway_id}/{path:path}", proxy, methods=["GET", "POST"]),

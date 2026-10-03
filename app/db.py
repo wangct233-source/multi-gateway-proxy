@@ -39,9 +39,12 @@ CREATE TABLE IF NOT EXISTS settings(
  PRIMARY KEY(gateway_id,key));
 """
 
-# v2: accounts 增加 secret_inline（导入的真实凭据）。仅加列，老代码 SELECT */INSERT 均兼容，
-# 因此 user_version 保持 1 不动，用 schema_version 表记录迁移进度，保证更新回滚后旧代码仍能启动。
-MIGRATIONS = {2: ("ALTER TABLE accounts ADD COLUMN secret_inline TEXT NOT NULL DEFAULT ''",)}
+# v2: accounts 增加 secret_inline（导入的真实凭据）。
+# v3: accounts 增加 refresh_inline（可轮换凭证的刷新令牌，仅 A/A2 形态账号使用）。
+# 仅加列，老代码 SELECT */INSERT 均兼容，因此 user_version 保持 1 不动，
+# 用 schema_version 表记录迁移进度，保证更新回滚后旧代码仍能启动。
+MIGRATIONS = {2: ("ALTER TABLE accounts ADD COLUMN secret_inline TEXT NOT NULL DEFAULT ''",),
+              3: ("ALTER TABLE accounts ADD COLUMN refresh_inline TEXT NOT NULL DEFAULT ''",)}
 
 
 class Database:
@@ -194,6 +197,7 @@ class Repository:
         provider = str(item.get("provider_account_id", ""))
         ref = str(item.get("secret_ref", ""))
         inline = str(item.get("secret_inline") or "")
+        refresh = str(item.get("refresh_inline") or "")
         if not identifier or len(identifier) > 128 or len(provider) > 256:
             raise ValueError("id and provider_account_id are required")
         if inline:
@@ -204,6 +208,8 @@ class Repository:
         else:
             secret_value(ref)
             ref = "env:" + ref.removeprefix("env:")
+        if refresh and len(refresh) > 16384:
+            raise ValueError("invalid refresh credential")
         others = await self.db.rows("SELECT gateway_id,secret_ref,secret_inline FROM accounts WHERE gateway_id<>?", (gid,))
         token = inline or (secret_value(ref) if ref else "")
         def resolved(row):
@@ -226,8 +232,13 @@ class Repository:
         if not isinstance(metadata, dict) or contains_secret(metadata):
             raise ValueError("metadata cannot contain credentials")
         statement = "INSERT OR IGNORE" if seed else "INSERT"
-        await self.db.write(f"{statement} INTO accounts(id,gateway_id,provider_account_id,secret_ref,secret_inline,enabled,metadata_json) VALUES(?,?,?,?,?,?,?)",
-                            (identifier, gid, provider, ref, inline, int(bool(item.get("enabled", True))), json.dumps(metadata)))
+        await self.db.write(f"{statement} INTO accounts(id,gateway_id,provider_account_id,secret_ref,secret_inline,refresh_inline,enabled,metadata_json) VALUES(?,?,?,?,?,?,?,?)",
+                            (identifier, gid, provider, ref, inline, refresh, int(bool(item.get("enabled", True))), json.dumps(metadata)))
+
+    async def update_credentials(self, gid, account_id, secret_inline: str, refresh_inline: str = ""):
+        """token 轮换成功后的持久化（与原项目 accounts/*.json 写回同义）。"""
+        await self.db.write("UPDATE accounts SET secret_inline=?,refresh_inline=? WHERE gateway_id=? AND id=?",
+                            (secret_inline, refresh_inline or "", gid, account_id))
 
     async def accounts(self, gid):
         rows = await self.db.rows("SELECT * FROM accounts WHERE gateway_id=?", (gid,))

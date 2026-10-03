@@ -104,6 +104,26 @@ class AccountPool:
                 await self.repository.db.enqueue_required("UPDATE accounts SET cooldown_until=? WHERE gateway_id=? AND id=?",
                                                           (cooldown, self.gid, account["id"]))
 
+    async def apply_action(self, lease, account_cooldown: float = 0, disable: bool = False, reason: str = ""):
+        """风控策略动作落地：账号冷却（内存+DB）或停用。"""
+        async with self.lock:
+            account = next((a for a in self.accounts if a["id"] == lease.account["id"]), None)
+            if not account:
+                return
+            self.affinity = {k: v for k, v in self.affinity.items() if v[0] != account["id"]}
+            if disable:
+                account["enabled"] = False
+                account["status"] = "disabled"
+                await self.repository.db.enqueue_required(
+                    "UPDATE accounts SET enabled=0,status='disabled',cooldown_until=? WHERE gateway_id=? AND id=?",
+                    (time.time() + account_cooldown, self.gid, account["id"]))
+                return
+            if account_cooldown > 0:
+                account["cooldown_until"] = time.time() + account_cooldown
+                await self.repository.db.enqueue_required(
+                    "UPDATE accounts SET cooldown_until=? WHERE gateway_id=? AND id=?",
+                    (account["cooldown_until"], self.gid, account["id"]))
+
     def public_accounts(self):
         # secret_inline 永不出现在任何 API 响应中。
         return [{"id": a["id"], "provider_account_id": a["provider_account_id"], "enabled": a["enabled"],

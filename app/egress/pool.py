@@ -66,12 +66,12 @@ class EgressPool:
                 return None
             return next((e for e in self.exits if e.healthy and e.blocked_until <= time.monotonic()), None)
 
-    async def fail(self, exit, reason="transport_failure"):
+    async def fail(self, exit, reason="transport_failure", duration: float = 60):
         async with self.lock:
             exit.healthy = False
             exit.error = reason
-            exit.blocked_until = time.monotonic() + 60
-        log.warning("gateway=%s egress=%s blocked: %s", self.config.id, exit.role, reason)
+            exit.blocked_until = time.monotonic() + max(1, duration)
+        log.warning("gateway=%s egress=%s blocked %.0fs: %s", self.config.id, exit.role, duration, reason)
 
     def public(self):
         return [{"id": e.role, "role": e.role, "healthy": e.healthy, "error": e.error,

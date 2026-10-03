@@ -207,26 +207,28 @@ class UnitTests(unittest.IsolatedAsyncioTestCase):
         # A 扁平格式
         claims = base64.urlsafe_b64encode(json.dumps({"sub": "uid-777"}).encode()).rstrip(b"=").decode()
         jwt_a = f"h.{claims}.s"
-        token, uid, meta = _extract_credential({"accessToken": jwt_a, "uid": "uid-777", "realm": "cn"})
+        token, uid, meta, refresh = _extract_credential({"accessToken": jwt_a, "uid": "uid-777",
+                                                         "realm": "cn", "refreshToken": "rt-1"})
         self.assertEqual((token, uid), (jwt_a, "uid-777"))
+        self.assertEqual(refresh, "rt-1")
         self.assertEqual(meta["realm"], "cn")
         # A2 嵌套格式（auth/account）
-        token, uid, meta = _extract_credential({"auth": {"accessToken": jwt_a}, "account": {"uid": "u2", "nickname": "小明"}})
+        token, uid, meta, _ = _extract_credential({"auth": {"accessToken": jwt_a}, "account": {"uid": "u2", "nickname": "小明"}})
         self.assertEqual(token, jwt_a)
         self.assertEqual(uid, "u2")
         self.assertEqual(meta["nickname"], "小明")
         # JWT sub 自动提取
-        token, uid, _ = _extract_credential({"accessToken": jwt_a})
+        token, uid, _, _ = _extract_credential({"accessToken": jwt_a})
         self.assertEqual(uid, "uid-777")
         # B 格式（token/user_id）
-        token, uid, _ = _extract_credential({"token": "trae-jwt-x", "user_id": "trae-user-1"})
+        token, uid, _, _ = _extract_credential({"token": "trae-jwt-x", "user_id": "trae-user-1"})
         self.assertEqual((token, uid), ("trae-jwt-x", "trae-user-1"))
         # C 格式（apiKey+secret 拼接）
-        token, uid, meta = _extract_credential({"apiKey": "ak123", "secret": "sk456", "userId": "zu", "provider": "zai"})
+        token, uid, meta, _ = _extract_credential({"apiKey": "ak123", "secret": "sk456", "userId": "zu", "provider": "zai"})
         self.assertEqual(token, "ak123.sk456")
         self.assertEqual(meta["provider"], "zai")
         # 裸字符串
-        token, uid, _ = _extract_credential("  rawtoken ")
+        token, uid, _, _ = _extract_credential("  rawtoken ")
         self.assertEqual(token, "rawtoken")
         # 不认识的格式必须报错
         with self.assertRaises(ValueError):
@@ -379,6 +381,56 @@ class UnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(openai["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]), {"q": "x"})
         self.assertEqual(openai["choices"][0]["finish_reason"], "tool_calls")
         self.assertEqual(openai["usage"]["total_tokens"], 14)
+
+    def test_risk_policies_isolated_per_gateway(self):
+        from app.risk import policy_for, task_interval_for
+        from app.risk.codebuddy import CodebuddyPolicy
+        from app.risk.trae import TraePolicy
+        from app.risk.zcode import ZcodePolicy
+        # 策略按网关隔离，互不串用
+        self.assertIsInstance(policy_for("a-cn"), CodebuddyPolicy)
+        self.assertIsInstance(policy_for("a-intl"), CodebuddyPolicy)
+        self.assertIsInstance(policy_for("b"), TraePolicy)
+        self.assertIsInstance(policy_for("c"), ZcodePolicy)
+        self.assertEqual(task_interval_for("a-cn"), 45.0)
+        self.assertEqual(task_interval_for("b"), 60.0)
+        self.assertEqual(task_interval_for("c"), 30.0)
+        # CodeBuddy：6004 只冷模型不冷账号；11140 停用；余额冷到次日 04:00
+        cb = policy_for("a-cn")
+        action = cb.classify(200, "6004", "")
+        self.assertEqual(action.model_cooldown, 300)
+        self.assertEqual(action.account_cooldown, 0)
+        self.assertTrue(policy_for("a-cn").classify(200, "11140", "").disable_account)
+        balance = cb.classify(200, "1002", "余额不足")
+        self.assertGreater(balance.account_cooldown, 0)
+        self.assertLess(balance.account_cooldown, 13 * 3600)  # 次日 04:00 封顶
+        # Trae：9074 指数退避；重复触发递增
+        tp = policy_for("b")
+        first = tp.classify(200, "9074", "")
+        second = tp.classify(200, "9074", "")
+        self.assertGreaterEqual(first.account_cooldown, 60)
+        self.assertGreater(second.account_cooldown, first.account_cooldown)  # 退避递增
+        self.assertLessEqual(second.account_cooldown, 3600)  # 封顶 1h
+        tp.clear_backoff()
+        # Zcode：3012 网关级静默（无独立 IP 的退化）+ 次日 0 点封顶；3009 模型级
+        zp = policy_for("c")
+        hold = zp.classify(200, "3012", "")
+        self.assertEqual(hold.egress_cooldown, hold.account_cooldown + hold.egress_cooldown)  # 只冷出口
+        self.assertGreaterEqual(hold.egress_cooldown, 600)
+        self.assertLessEqual(hold.egress_cooldown, 24 * 3600)
+        model = zp.classify(429, "3009", "", retry_after=120)
+        self.assertEqual(model.model_cooldown, 120)
+        login = zp.classify(401, "", "")
+        self.assertTrue(login.disable_account)
+        # 错误提取兼容三种形态
+        body = json.dumps({"code": 6004, "message": "rate"}).encode()
+        self.assertEqual(CodebuddyPolicy.extract_error(body), ("6004", "rate"))
+        openai_body = json.dumps({"error": {"code": "x", "message": "m"}}).encode()
+        self.assertEqual(CodebuddyPolicy.extract_error(openai_body), ("x", "m"))
+        anthropic_body = json.dumps({"type": "error", "error": {"type": "authentication_error", "message": "bad"}}).encode()
+        self.assertEqual(ZcodePolicy.extract_error(anthropic_body), ("authentication_error", "bad"))
+        # 策略对象互不共享状态
+        self.assertIsNot(policy_for("a-cn"), policy_for("b"))
 
     async def test_update_image_mode_state_machine(self):
         from app.updater import Updater

@@ -35,7 +35,12 @@ class CheckinExecutor:
             return {"executed": False, "status": "evidence_required"}
         results = []
         async with self.locks[gid]:
-            for aid in preview["accounts"]:
+            # 批量任务的账号错峰：按本网关策略间隔 + 抖动（CodeBuddy 45s / Trae 60s）。
+            from app.risk.base import jitter
+            from app.risk.base import task_interval_for
+            for index, aid in enumerate(preview["accounts"]):
+                if index > 0:
+                    await asyncio.sleep(jitter(task_interval_for(gid)))
                 # Re-check the global switch between accounts, including after any awaited operation.
                 if not self.guard.preview(gid, "checkin", aid)["allowed"]:
                     break
