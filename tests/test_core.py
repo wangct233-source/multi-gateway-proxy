@@ -545,10 +545,11 @@ class UnitTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(auth.is_default)
             self.assertTrue(auth.verify("admin"))
             self.assertFalse(auth.verify("wrong"))
-            # 重启后仍然有效（admin_auth 表持久化）。
+            # 重启后仍然有效（admin_auth 表持久化），且默认密码标志从哈希反推不丢失。
             reloaded = AdminAuth()
             await reloaded.load(repo)
             self.assertTrue(reloaded.verify("admin"))
+            self.assertTrue(reloaded.is_default)
             # 修改密码：新密码生效、旧密码失效、不再是默认态。
             reloaded.set_password("newpass123")
             await reloaded.save(repo)

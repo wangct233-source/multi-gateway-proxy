@@ -28,12 +28,16 @@ class AdminAuth:
         self._fails: dict[str, list] = {}
 
     async def load(self, repository):
-        """启动时装载；首次启动播种默认密码 admin。"""
+        """启动时装载；首次启动播种默认密码 admin。
+
+        is_default 不落库，每次从哈希反推：存的就是 admin 的哈希即视为默认密码，
+        避免进程重启后丢失该标志（云端实测踩坑）。
+        """
         rows = await repository.db.rows("SELECT password_salt,password_hash FROM admin_auth WHERE id=1")
         if rows:
             self.salt = str(rows[0]["password_salt"])
             self.hash = str(rows[0]["password_hash"])
-            self.is_default = False
+            self.is_default = self.verify(DEFAULT_PASSWORD)
             return
         self.set_password(DEFAULT_PASSWORD)
         await self.save(repository)
