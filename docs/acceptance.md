@@ -55,6 +55,16 @@
 
 **测试与部署**：单测 19 项全过（新增 6 项协议测试，含跨传输块 UTF-8 行解析——发现并修复逐块 decode 截断缺陷，改为字节级缓冲）；`scripts/native_acceptance.py` 本机四场景全绿（G3/G4 流式+非流式+工具调用，快照无重复累积）；mock_upstream 增加 chat_sessions/messages 模拟（并修复 keep-alive 下 POST body 未消费导致的连接错位）。部署链路随外部会话的 v1.0 镜像模式演进：push→GHA build-image→云端拉 GHCR 镜像 sha-a2f9902 重建 app 与 fixture（MGP_IMAGE 已固化进云端 .env；fixture 曾误用旧 local 镜像致新 mock 路由缺失，已换同版本镜像）。云端实测：四网关 ready；G3/G4 经 /v3 /v4 公网数据面流式+非流式返回正确 OpenAI 格式。**状态：mock 验证通过；真实 Trae/Zcode 上游未接（等待用户提供真实账号）**。B/C 出口改 direct://local（容器启动早于 fixture 的首轮检查失败会 60s 隔离后自愈）。
 
+## 按网关隔离的风控体系（2026-10-03，97f4b36）
+
+**设计原则（用户明确要求）**：A/B/C 三家上游风控体系互不通用（腾讯业务码 / 字节 9074 / 智谱 IP 级 3012），参数不可互换——`app/risk/` 骨架只提供分类/退避/封顶的通用机制，错误码语义、冷却时长、任务间隔全部写在各网关专属策略文件（codebuddy.py / trae.py / zcode.py），互不引用。
+
+- **错误分类冷却**：proxy() 非 200 响应统一走 apply_risk——解析响应体业务码（兼容 CodeBuddy 业务码/OpenAI error/Anthropic error 三形态）→ 策略分类 → 落地（账号冷却内存+DB / 模型冷却 / 出口冷却 / 停用）。CodeBuddy：6004 只冷模型 300s 不冷账号、11102 负缓存 6h、11140 停用、余额类冷到次日 04:00、WAF 403 账号+出口抖动冷却；Trae：9074 指数退避 60s→1h 封顶（连续失败计数，当日封顶）；Zcode：3012 网关级静默（无独立出口 IP 的显式退化）10min→6h 封顶次日 00:00、3009 尊重 Retry-After 模型冷却、login_required 停用。
+- **模型级冷却**：Runtime.model_cooldown 热状态；准入前检查，冷却中的模型返回 429+Retry-After，不影响账号与其他模型；管理 API public() 暴露 model_cooldowns。
+- **token 提前刷新**（G1/G2）：accounts v3 迁移加 refresh_inline（幂等，回滚兼容）；导入自动提取 refreshToken；a 模式请求前检查 JWT exp（5 分钟缓冲），轮换锁串行双检，POST /v2/plugin/auth/token/refresh 成功后写回 DB 并热更新租约。B/C 无刷新协议证据，保持不实现。
+- **一键批量签到**：POST /api/v1/tasks/batch-run 逐网关执行，各网关用各自的策略间隔错峰（CodeBuddy 45s / Trae 60s / Zcode 30s + 0~25% 抖动）；仍受杀开关/证据/窗口/每日限额约束（云端实测杀开关开启时 403）；UI 任务页新增批量按钮。claim/activity 仍 501 evidence_required。
+- **测试**：单测 20 项全过（新增策略隔离+分类+退避递增+封顶+三形态错误提取）；native_acceptance 四场景回归全绿；云端部署 97f4b36 镜像实测四网关 ready、门禁 403、G1 真实链路 401（预期）、G3 mock 流式正常。
+
 ## 性能（实测，非容量承诺）
 
 | 负载 | 总请求 | 客户端在途峰值 | 总QPS | 总延迟p50/p95 ms | 失败率 |
