@@ -743,6 +743,83 @@ async def kill_switch(request):
     return JSONResponse({"enabled": state.tasks.kill_switch})
 
 
+async def gateway_usage(request):
+    """本地用量统计：request_logs 聚合（24h 概览 + 错误分类 + 最近 50 条）。"""
+    state = request.app.state.runtime
+    if not admin(request):
+        return error(401, "unauthorized", "Admin Token required")
+    gid = request.path_params["gateway_id"]
+    runtime = state.runtimes.get(gid)
+    if runtime is None:
+        return error(404, "gateway_not_found", "Unknown gateway")
+    day_ago = time.time() - 86400
+    db = state.db
+    summary = (await db.rows(
+        "SELECT COUNT(*) AS total, SUM(CASE WHEN status_code<400 THEN 1 ELSE 0 END) AS ok, "
+        "SUM(CASE WHEN streamed=1 THEN 1 ELSE 0 END) AS streamed, AVG(duration_ms) AS avg_ms "
+        "FROM request_logs WHERE gateway_id=? AND created_at>=?", (gid, day_ago)))[0]
+    errors = await db.rows(
+        "SELECT status_code, error_class, COUNT(*) AS n FROM request_logs "
+        "WHERE gateway_id=? AND created_at>=? AND status_code>=400 GROUP BY status_code, error_class ORDER BY n DESC LIMIT 10",
+        (gid, day_ago))
+    recent = await db.rows(
+        "SELECT request_id, account_id, status_code, duration_ms, streamed, error_class, created_at "
+        "FROM request_logs WHERE gateway_id=? ORDER BY id DESC LIMIT 50", (gid,))
+    total = int(summary["total"] or 0)
+    ok = int(summary["ok"] or 0)
+    return JSONResponse({
+        "window": "24h", "total": total, "ok": ok, "failed": total - ok,
+        "streamed": int(summary["streamed"] or 0),
+        "avg_ms": round(float(summary["avg_ms"] or 0), 1),
+        "success_rate": round(ok / total, 4) if total else None,
+        "errors": errors, "recent": recent,
+        "models": runtime.config.models,
+        "model_cooldowns": runtime.public()["model_cooldowns"]})
+
+
+async def gateway_credits(request):
+    """上游余额查询（仅 A-1/A-2 有协议证据；5 分钟缓存避免频繁打计费域）。"""
+    state = request.app.state.runtime
+    if not admin(request):
+        return error(401, "unauthorized", "Admin Token required")
+    gid = request.path_params["gateway_id"]
+    runtime = state.runtimes.get(gid)
+    if runtime is None:
+        return error(404, "gateway_not_found", "Unknown gateway")
+    if runtime.config.mode != "a":
+        return error(501, "evidence_required", "Credit query is only implemented for CodeBuddy (a mode)",
+                     missing_evidence=["Trae/Zcode balance protocol evidence"])
+    cached = getattr(runtime, "_credits_cache", None)
+    if cached and cached[0] > time.time() - 300:
+        return JSONResponse(cached[1])
+    exit_ = await runtime.egress.select()
+    if not exit_:
+        return error(503, "no_healthy_egress", "Gateway paused")
+    lease = await runtime.pool.acquire()
+    if not lease:
+        return error(429, "no_account_capacity", "No enabled account for credit query")
+    try:
+        from .gateways.a_domestic import credits_request, parse_credits
+        realm = "cn" if gid == "a-cn" else "intl"
+        url, headers, body = credits_request(realm, lease)
+        response = await exit_.client.post(url, json=body, headers=headers, timeout=20)
+        if response.status_code >= 400:
+            return error(502, "credits_query_failed", "Upstream billing query failed",
+                         upstream_status=response.status_code)
+        credits = parse_credits(response.json())
+        if not credits:
+            return JSONResponse({"gateway_id": gid, "available": False,
+                                 "note": "no package data parsed; raw schema may differ"})
+        result = {"gateway_id": gid, "available": True, "credits": credits,
+                  "account_id": lease.account["id"], "queried_at": time.time()}
+        runtime._credits_cache = (time.time(), result)
+        return JSONResponse(result)
+    except (httpx.HTTPError, ValueError):
+        return error(502, "credits_query_failed", "Upstream billing query failed")
+    finally:
+        await runtime.pool.release(lease)
+
+
 async def batch_run(request):
     """一键批量任务：跨网关逐个执行（各网关用各自的策略间隔与门禁）。
 
@@ -842,6 +919,8 @@ def create_app(config=None):
         Route("/api/v1/gateways/{gateway_id}/accounts/login-status", account_login_status, methods=["GET"]),
         Route("/api/v1/gateways/{gateway_id}/accounts/import", account_import, methods=["POST"]),
         Route("/api/v1/gateways/{gateway_id}/tasks/{task_type}/run", task_run, methods=["POST"]),
+        Route("/api/v1/gateways/{gateway_id}/usage", gateway_usage, methods=["GET"]),
+        Route("/api/v1/gateways/{gateway_id}/credits", gateway_credits, methods=["GET"]),
         Route("/api/v1/gateways/{gateway_id}/accounts/{account_id}", management, methods=["PATCH"], name="accounts"),
         Route("/api/v1/gateways/{gateway_id}/{resource}", management, methods=["GET", "POST", "PATCH"]),
         Route("/api/v1/tasks/kill-switch", kill_switch, methods=["GET", "POST"]),

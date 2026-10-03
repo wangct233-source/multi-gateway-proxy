@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
-GATEWAYS = {"a-cn": ("A_CN", "A 国内"), "a-intl": ("A_INTL", "A 国际"),
-            "b": ("B", "B"), "c": ("C", "C")}
+GATEWAYS = {"a-cn": ("A_CN", "A-1 腾讯国内"), "a-intl": ("A_INTL", "A-2 腾讯国际"),
+            "b": ("B", "B TRAE CN"), "c": ("C", "C Zcode")}
 
 
 def boolean(name: str, default: bool = False) -> bool:

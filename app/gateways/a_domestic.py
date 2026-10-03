@@ -84,7 +84,64 @@ class DomesticAdapter(GatewayAdapter):
 
 # 刷新协议（wb_accounts.py:525-565 同构）：轮换式 refreshToken，必须串行。
 REFRESH_PATH = "v2/plugin/auth/token/refresh"
+# 余额/套餐查询（fetch_credits，wb_accounts.py:150-151,766-815 同构）。
+CREDITS_PATH = "v2/billing/meter/get-user-resource"
+# 计费域与 chat 域可不同（analysis_A_domestic：国内 billing=www.codebuddy.cn）。
+BILLING_BASE = {"cn": "https://www.codebuddy.cn", "intl": "https://www.workbuddy.ai"}
 _REFRESH_LOCKS: dict[str, "asyncio.Lock"] = {}
+
+
+def credits_request(realm: str, lease) -> tuple[str, dict, dict]:
+    """构造余额查询请求（billing 身份头，purpose=billing 同款）。返回 (url, headers, body)。"""
+    cfg = REALMS[realm]
+    uid = _jwt_sub(lease.token) or str(lease.account.get("provider_account_id") or "") or "anonymous"
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": cfg["user_agent"],
+        "Origin": cfg["origin"],
+        "Referer": cfg["origin"] + "/",
+        "Authorization": "Bearer " + lease.token,
+        "X-User-Id": uid,
+        "X-Domain": cfg["domain"],
+        "X-CodeBuddy-Request": "1",
+        "X-Machine-ID": _derive_id(uid, "machine"),
+        "X-Session-ID": _derive_id(uid, "session"),
+        "Accept-Language": cfg["language"],
+    }
+    if realm == "cn":
+        headers["X-Product"] = "SaaS"
+    body = {"PageNumber": 1, "PageSize": 20, "ProductCode": "p_tcaca",
+            "Status": [0, 3], "PackageEndTime": ""}
+    return upstream_url(BILLING_BASE[realm], CREDITS_PATH), headers, body
+
+
+def parse_credits(payload) -> dict:
+    """聚合套餐余量（data.Response.Data.Accounts[] 按套餐累加 remain/used/size）。"""
+    accounts = []
+    try:
+        accounts = (payload or {}).get("data", {}).get("Response", {}).get("Data", {}).get("Accounts") or []
+    except AttributeError:
+        return {}
+    remain = used = size = 0
+    packages = 0
+    for pkg in accounts:
+        if not isinstance(pkg, dict):
+            continue
+        for cycle in (pkg.get("Cycles") or pkg.get("Cycle") or [pkg]):
+            if not isinstance(cycle, dict):
+                continue
+            try:
+                remain += float(cycle.get("Remain") or cycle.get("remain") or 0)
+                used += float(cycle.get("Used") or cycle.get("used") or 0)
+                size += float(cycle.get("Size") or cycle.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+        packages += 1
+    if packages == 0:
+        return {}
+    return {"remain": remain, "used": used, "size": size, "packages": packages}
 
 
 def refresh_lock(account_key: str) -> "asyncio.Lock":
