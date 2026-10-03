@@ -82,6 +82,14 @@
 - **工程校验**：node --check 通过；脚本交叉校验 app.js 引用的 70 个 DOM id 全部存在于 index.html；本地 http.server + 浏览器代理实测七项（导航/页签/空态/深色主题/视图切换）全部通过后修复最后一项（accounts-grid 初始占位文案）。
 - **部署**：UI 仓 push（b69199a + 092098d release.json 0.2.0）→ uipush.py SFTP 同步 4 个静态文件至 /opt/multi-gateway-proxy-ui-static → 公网 https 18443 实测返回新版 HTML/JS，healthz 200。后端镜像未动（后端仓无改动，UI 由 nginx 静态托管不进镜像）。styles.css 顺带清理 #1f3busy 笔误。
 
+## 过期更新状态遮盖修复（2026-10-03，cc6adf4，云端实测踩坑）
+
+- **现象**：push 文档提交 5e4f4a3 后 `POST /api/updates/check` 返回 state=applied 但容器自报 commit=d44e6ac、实际运行镜像却是 sha-ae7e7ea——三者互相矛盾。
+- **根因**：`data/image-update-status.json` 是 01:30 cron 应用 d44e6ac 时写的；随后上个会话手动把 `.env` MGP_IMAGE 改回 sha-ae7e7ea 重建（04:56Z），未删状态文件。`Updater.status()` 无条件合并 host 状态 → 旧的 applied 永久遮盖真实状态；`apply()` 见非 available 只重新 check 永不武装——更新链路被卡死。
+- **修复（cc6adf4）**：`status()` 只在 host 状态文件的 image 与运行镜像（MGP_IMAGE）一致时才采纳；不一致视为过期忽略（不带 image 字段的旧格式保持原行为）。新增单测 test_update_stale_host_status_is_ignored，21 项全过。
+- **云端解锁与实测**：备份并删除过期状态文件（image-update-status.json.bak-stale-20261003）→ check=available（candidate=cc6adf4）→ apply=applying → 约 2 分钟后 applied，容器切至 sha-cc6adf4、healthz 200、四网关 ready、18443 返回重构后新 UI。本轮验证了「手动回滚后更新链路仍可用」，修复后此类操作不再需要手工清状态文件。
+
+
 ## 性能（实测，非容量承诺）
 
 | 负载 | 总请求 | 客户端在途峰值 | 总QPS | 总延迟p50/p95 ms | 失败率 |
