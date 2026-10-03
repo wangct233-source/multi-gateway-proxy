@@ -2,7 +2,7 @@
 
 机制来源（只读参考）：wb_accounts.py:45-117（线性退避仅网络类）、
 wb_accounts.py:236-241,822-853（6004 只冷模型不冷账号）、
-codebuddy-反代/2 internal/pool/cooldown.go:123-419（11102 负缓存、11140 禁用、
+CodeBuddy Go 参考实现 internal/pool/cooldown.go:123-419（11102 负缓存、11140 禁用、
 余额耗尽冷到次日 04:00、WAF 403 抖动）。
 这些业务码是腾讯 CodeBuddy 私有语义，不适用于其他上游。
 """

@@ -1,6 +1,6 @@
 """Zcode Anthropic 协议转换（G4 / c-anthropic）。
 
-机制来源（只读参考，未复制代码）：zcode-反代/.../src/proxy/upstream.ts:58-128,
+机制来源（只读参考，未复制代码）：ZcodeKnight src/proxy/upstream.ts:58-128,
 src/translator/（openai↔anthropic 双向与 SSE 翻译）。
 协议要点：
 - 上游为 Anthropic Messages API：POST {base}/v1/messages。

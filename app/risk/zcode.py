@@ -1,6 +1,6 @@
 """Zcode（G4）专属风险策略。
 
-机制来源（只读参考）：zcode-反代/.../src/proxy/risk-hold.ts:27-48（3012 按
+机制来源（只读参考）：ZcodeKnight src/proxy/risk-hold.ts:27-48（3012 按
 出口 IP 计静默、模型静默窗口尊重 Retry-After）、claim/scheduler.ts:77-88,147-155
 （连续错误指数退避 10min→6h 封顶、跨日 00:00 清零）、scheduler.ts:119-133
 （首 tick 账号错峰防同 IP 3012）。

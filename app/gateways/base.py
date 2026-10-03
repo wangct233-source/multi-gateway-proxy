@@ -34,7 +34,7 @@ class GatewayAdapter:
     def capabilities(self):
         native = self.config.mode in {"disabled", "b-remote", "c-anthropic"}
         proxy = {"status": "evidence_required" if native else "supported",
-                 "evidence": ["docs/evidence.md: explicit authorized OpenAI-compatible transport"],
+                 "evidence": ["app/gateways: explicit authorized OpenAI-compatible transport"],
                  "upstream_verified": False,
                  "missing_evidence": list(getattr(self, "missing_evidence", ("Python provider adapter and authorized upstream regression samples",))) if native else []}
         absent = {"status": "evidence_required", "evidence": [],
@@ -45,7 +45,7 @@ class GatewayAdapter:
         if self.config.id in EVIDENCE and boolean(self.config.prefix + "_CHECKIN_VERIFIED"):
             checkin = {"status": "supported", "evidence": EVIDENCE[self.config.id], "missing_evidence": []}
         if self.config.id == "c":
-            checkin = {"status": "unsupported", "evidence": ["zcode-反代/analysis_shtu:1252-1255"],
+            checkin = {"status": "unsupported", "evidence": ["Zcode source review: no traditional checkin implementation found"],
                        "missing_evidence": ["No traditional checkin implementation in reviewed report"]}
         return {"proxy": proxy, "stream": proxy, "responses": absent, "websocket": absent,
                 "checkin": checkin, "claim": absent, "activity": absent}

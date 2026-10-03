@@ -1,6 +1,6 @@
 """Trae remote 两步会话协议（G3 / b-remote）。
 
-机制来源（只读参考，未复制代码）：trae-反代/src/trae_remote_client.py:808-943,
+机制来源（只读参考，未复制代码）：Trae2api-cn src/trae_remote_client.py:808-943,
 src/trae_client.py:891-935, src/sse.py:1691-1879。
 协议要点：
 - 先 POST {base}/chat_sessions 创建会话（JSON），再 GET .../events 流式读私有事件帧。

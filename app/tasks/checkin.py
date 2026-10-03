@@ -11,7 +11,7 @@ from app.gateways.base import upstream_url
 
 EVIDENCE = {
     "a-cn": ["analysis_A_domestic.md:581-607; wb_accounts.py:742-764"],
-    "b": ["trae-反代/analysis_shtu:1560-1794; src/trae_client.py:557,570"],
+    "b": ["Trae2api-cn analysis_shtu:1560-1794; src/trae_client.py:557,570"],
 }
 
 

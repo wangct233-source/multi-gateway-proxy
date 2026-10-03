@@ -49,7 +49,7 @@
 
 ## G3/G4 原生协议移植（2026-10-03，新增）
 
-**G3 b-remote（a2f9902，新 Python 实现，机制源自 trae-反代 只读参考）**：两步会话协议——`POST /chat_sessions`（flatten_query 拍平消息、agent_type/agent_id=solo_agent_remote、common_params 含 token+uid 稳定派生 device_id）→ `GET /chat_sessions/{id}/events?reply_to_message_id=` 读私有事件帧。网关侧把累积快照 message 事件计算为文本增量，heartbeat 转 SSE 注释帧，token_usage 映射 usage，done 缺失按不完整回合报错而非伪装成功。认证 `Cloud-IDE-JWT`，origin/referer 按 solo.trae.cn。
+**G3 b-remote（a2f9902，新 Python 实现，机制源自 Trae2api-cn 参考源码只读审阅）**：两步会话协议——`POST /chat_sessions`（flatten_query 拍平消息、agent_type/agent_id=solo_agent_remote、common_params 含 token+uid 稳定派生 device_id）→ `GET /chat_sessions/{id}/events?reply_to_message_id=` 读私有事件帧。网关侧把累积快照 message 事件计算为文本增量，heartbeat 转 SSE 注释帧，token_usage 映射 usage，done 缺失按不完整回合报错而非伪装成功。认证 `Cloud-IDE-JWT`，origin/referer 按 solo.trae.cn。
 
 **G4 c-anthropic（同 commit）**：OpenAI↔Anthropic Messages 双向转换——system 抽取、tool_calls↔tool_use、tool↔tool_result、流式 content_block_delta(text_delta/input_json_delta)→chunk 增量、stop_reason 映射（end_turn→stop、tool_use→tool_calls、max_tokens→length）。双认证头 x-api-key+Bearer，anthropic-version 2023-06-01；签名路径按源码 fail-open 事实仅走免签 LLM 主路径。
 
