@@ -34,6 +34,46 @@ def anthropic_headers(credential: str, stream: bool) -> dict:
     }
 
 
+# ── 余额查询（强证据：routes-quota.ts:219-258 — billing/balance 需 Bearer JWT）──
+ZCODE_PLAN_ORIGIN = "https://zcode.z.ai"
+BALANCE_PATH = "api/v1/zcode-plan/billing/balance"
+
+
+def balance_request(jwt: str) -> tuple[str, dict]:
+    """构造套餐余额查询。仅 start-plan JWT 凭据可用；apiKey 无此查询证据。"""
+    url = f"{ZCODE_PLAN_ORIGIN}/{BALANCE_PATH}?app_version=3.12.3&platform=windows"
+    return url, {"Authorization": "Bearer " + jwt, "Accept": "application/json",
+                 "User-Agent": SDK_UA, "Accept-Encoding": "identity"}
+
+
+def parse_c_credits(payload) -> dict:
+    """聚合 data.balances[]（remaining_units/total_units/used_units）。"""
+    try:
+        balances = (payload or {}).get("data", {}).get("balances") or []
+    except AttributeError:
+        return {}
+    remain = used = total = 0.0
+    items = []
+    for entry in balances:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            r = float(entry.get("remaining_units") or 0)
+            u = float(entry.get("used_units") or 0)
+            t = float(entry.get("total_units") or 0)
+        except (TypeError, ValueError):
+            continue
+        remain += r
+        used += u
+        total += t
+        items.append({"name": str(entry.get("show_name") or ""), "remaining": r,
+                      "unit_type": str(entry.get("unit_type") or ""),
+                      "expires_at": entry.get("expires_at")})
+    if not items:
+        return {}
+    return {"remaining": remain, "used": used, "total": total, "packages": items}
+
+
 def _content_text(content) -> str:
     if content is None:
         return ""

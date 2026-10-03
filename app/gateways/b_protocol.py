@@ -145,6 +145,70 @@ def parse_session_response(payload: dict) -> tuple[str, str]:
     return str(data.get("chat_session_id") or ""), str(data.get("message_id") or "")
 
 
+# ── 积分/余额查询（强证据：trae_client.py:536-555,618-638,695-738 实际调用）──
+UG_API_HOST = "https://api.trae.cn"
+CHECKIN_STATUS_PATH = "trae/api/v2/ug/checkin_credits/status"
+ENT_USAGE_PATH = "trae/api/v2/pay/ide_user_ent_usage"
+
+
+def checkin_headers(token: str, account_id: str) -> dict:
+    """签到/积分接口头（build_checkin_headers 同构）。"""
+    return {
+        "Authorization": "Cloud-IDE-JWT " + token,
+        "Content-Type": "application/json",
+        "x-device-id": device_id_for(token, account_id),
+        "x-device-brand": "trae",
+        "x-device-type": "windows",
+        "Accept-Encoding": "identity",
+    }
+
+
+def credits_requests(token: str, account_id: str) -> list[tuple[str, dict, dict]]:
+    """构造两个查询：(签到状态, 账户积分余额)。返回 [(name, url, headers, body)]。"""
+    headers = checkin_headers(token, account_id)
+    return [
+        ("checkin_status", f"{UG_API_HOST}/{CHECKIN_STATUS_PATH}", headers, {}),
+        ("credits", f"{UG_API_HOST}/{ENT_USAGE_PATH}", headers, {"require_usage": True, "req_source": 1}),
+    ]
+
+
+def parse_b_credits(checkin_payload, usage_payload) -> dict:
+    """聚合签到状态与积分余额（parse_account_credits 同构）。"""
+    out: dict = {}
+    if isinstance(checkin_payload, dict):
+        data = checkin_payload.get("data") if isinstance(checkin_payload.get("data"), dict) else checkin_payload
+        if "checked_in" in data or "credits" in data:
+            out["checked_in"] = bool(data.get("checked_in"))
+            try:
+                out["checkin_credits"] = float(data.get("credits") or 0)
+            except (TypeError, ValueError):
+                pass
+    if not isinstance(usage_payload, dict):
+        return out
+    total = used = 0.0
+    packs = usage_payload.get("user_entitlement_pack_list") or []
+    for pack in packs:
+        if not isinstance(pack, dict):
+            continue
+        base_info = pack.get("entitlement_base_info") or {}
+        quota = base_info.get("quota") or {}
+        try:
+            total += float(quota.get("credits_limit") or 0)
+        except (TypeError, ValueError):
+            pass
+        usage = pack.get("usage") or {}
+        try:
+            used += float(usage.get("credits_amount") or 0)
+        except (TypeError, ValueError):
+            pass
+    if total:
+        out["total_limit"] = total
+        out["used"] = used
+        out["remaining"] = max(0.0, total - used)
+    out["unlimited"] = bool(usage_payload.get("is_credits_billing")) if "is_credits_billing" in usage_payload else out.get("unlimited", False)
+    return out
+
+
 def _message_text(data: dict) -> str:
     """提取可见文本（sse.py:1691-1722 同构）。"""
     if not isinstance(data, dict):

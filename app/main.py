@@ -778,7 +778,7 @@ async def gateway_usage(request):
 
 
 async def gateway_credits(request):
-    """上游余额查询（仅 A-1/A-2 有协议证据；5 分钟缓存避免频繁打计费域）。"""
+    """上游余额查询（A/B/C 各自协议；5 分钟缓存避免频繁打计费域）。"""
     state = request.app.state.runtime
     if not admin(request):
         return error(401, "unauthorized", "Admin Token required")
@@ -786,9 +786,8 @@ async def gateway_credits(request):
     runtime = state.runtimes.get(gid)
     if runtime is None:
         return error(404, "gateway_not_found", "Unknown gateway")
-    if runtime.config.mode != "a":
-        return error(501, "evidence_required", "Credit query is only implemented for CodeBuddy (a mode)",
-                     missing_evidence=["Trae/Zcode balance protocol evidence"])
+    if runtime.config.mode == "disabled":
+        return error(503, "gateway_disabled", "Enable an upstream mode first")
     cached = getattr(runtime, "_credits_cache", None)
     if cached and cached[0] > time.time() - 300:
         return JSONResponse(cached[1])
@@ -799,6 +798,19 @@ async def gateway_credits(request):
     if not lease:
         return error(429, "no_account_capacity", "No enabled account for credit query")
     try:
+        result = await _query_credits(runtime, exit_, lease, gid)
+        if isinstance(result, JSONResponse):
+            return result
+        runtime._credits_cache = (time.time(), result)
+        return JSONResponse(result)
+    except (httpx.HTTPError, ValueError):
+        return error(502, "credits_query_failed", "Upstream billing query failed")
+    finally:
+        await runtime.pool.release(lease)
+
+
+async def _query_credits(runtime, exit_, lease, gid):
+    if runtime.config.mode == "a":
         from .gateways.a_domestic import credits_request, parse_credits
         realm = "cn" if gid == "a-cn" else "intl"
         url, headers, body = credits_request(realm, lease)
@@ -808,16 +820,47 @@ async def gateway_credits(request):
                          upstream_status=response.status_code)
         credits = parse_credits(response.json())
         if not credits:
-            return JSONResponse({"gateway_id": gid, "available": False,
-                                 "note": "no package data parsed; raw schema may differ"})
-        result = {"gateway_id": gid, "available": True, "credits": credits,
-                  "account_id": lease.account["id"], "queried_at": time.time()}
-        runtime._credits_cache = (time.time(), result)
-        return JSONResponse(result)
-    except (httpx.HTTPError, ValueError):
-        return error(502, "credits_query_failed", "Upstream billing query failed")
-    finally:
-        await runtime.pool.release(lease)
+            return {"gateway_id": gid, "available": False,
+                    "note": "no package data parsed; raw schema may differ"}
+        return {"gateway_id": gid, "available": True, "credits": credits,
+                "account_id": lease.account["id"], "queried_at": time.time()}
+    if runtime.config.mode == "b-remote":
+        from .gateways import b_protocol
+        payloads = {}
+        for name, url, headers, body in b_protocol.credits_requests(
+                lease.token, lease.account.get("provider_account_id") or ""):
+            response = await exit_.client.post(url, json=body, headers=headers, timeout=20)
+            if response.status_code >= 400:
+                return error(502, "credits_query_failed", f"{name} failed",
+                             upstream_status=response.status_code)
+            payloads[name] = response.json()
+        credits = b_protocol.parse_b_credits(payloads.get("checkin_status"), payloads.get("credits"))
+        if not credits:
+            return {"gateway_id": gid, "available": False,
+                    "note": "no credit/entitlement data parsed; raw schema may differ"}
+        return {"gateway_id": gid, "available": True, "credits": credits,
+                "account_id": lease.account["id"], "queried_at": time.time()}
+    if runtime.config.mode == "c-anthropic":
+        from .gateways import c_protocol
+        # balance 需要 start-plan JWT；apiKey 凭据无余额查询证据，如实告知而非伪造。
+        jwt = lease.account.get("metadata", {}).get("jwt") or ""
+        if not jwt:
+            return error(501, "evidence_required",
+                         "Zcode balance query needs a start-plan JWT credential",
+                         missing_evidence=["Account imported with metadata.jwt (start-plan login token)",
+                                           "apiKey-only credentials have no documented balance API"])
+        url, headers = c_protocol.balance_request(jwt)
+        response = await exit_.client.get(url, headers=headers, timeout=20)
+        if response.status_code >= 400:
+            return error(502, "credits_query_failed", "Upstream balance query failed",
+                         upstream_status=response.status_code)
+        credits = c_protocol.parse_c_credits(response.json())
+        if not credits:
+            return {"gateway_id": gid, "available": False,
+                    "note": "no balance data parsed; raw schema may differ"}
+        return {"gateway_id": gid, "available": True, "credits": credits,
+                "account_id": lease.account["id"], "queried_at": time.time()}
+    return error(501, "evidence_required", "No balance protocol for this mode")
 
 
 async def batch_run(request):
