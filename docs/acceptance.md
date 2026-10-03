@@ -72,6 +72,16 @@
 - **上游余额查询**：`GET …/credits`（A/B/C 各自协议，ae7e7ea）——A：POST {billing 域}/v2/billing/meter/get-user-resource（国内 billing=www.codebuddy.cn 与 chat 域分离），聚合套餐 remain/used/size；**B（强证据 trae_client.py:536-555,618-638,695-738）**：POST api.trae.cn/trae/api/v2/ug/checkin_credits/status（签到状态 checked_in/credits）+ POST …/pay/ide_user_ent_usage（entitlement 套餐 credits_limit/usage.credits_amount → total_limit/used/remaining），Cloud-IDE-JWT + x-device-id 稳定派生；**C（强证据 routes-quota.ts:219-258）**：GET zcode.z.ai/api/v1/zcode-plan/billing/balance → data.balances[] remaining_units/total_units——**仅 start-plan JWT 可查**，apiKey-only 账号如实 501 evidence_required（不冒充）。三家 5 分钟缓存+单账号租约。云端实测（ae7e7ea 镜像）：B 真实链路 401 透传（假令牌预期）、C 如实 501 提示需 JWT、A 同前。
 - **UI**：新「模型与用量」页签（KPI 卡 + 模型表 + 最近请求表 + 模型冷却提示 + 余额查询按钮全网关显示，各网关显示各自协议说明）；任务页新增每网关「立即签到 / 领取奖励」按钮（真实执行，claim 缺证据如实 501）。UI 文件已同步服务器 18443。
 
+## UI 重构（2026-10-03，ui b69199a/092098d，用户要求学 sub2api + 本地项目 C 的 UI 与交互）
+
+- **触发**：用户明确不喜欢旧 UI，指定参考 sub2api（交互）与本地 Zcode 反代项目（视觉）。子代理分析两者得出模式清单：深色 CSS 变量主题、卡片网格、胶囊导航、左边框 3px 状态色条、进度条余额、5s 可见轮询、diff-key 复用 DOM（视觉抄 Zcode）；工具条搜索/筛选、批量操作、Toggle、危险操作 confirm、DataTable（交互抄 sub2api）。纯静态无框架不变。
+- **布局重做**：左侧 240px 侧边栏 + 六胶囊导航（全局监控 / 四网关独立视图 / 全局设置与更新）；网关视图共用一个模板 section（JS 切换 data-gw），五页签：账号池 / 模型与用量 / 任务 / 设置 / 证据（capabilities 从设置页拆出独立「证据」页签，修复原 HTML 缺 pane-caps）。
+- **账号池**：表格改卡片网格（.acc-grid），状态左边框色条 ok/cooldown/disabled/bad，工具条搜索（按 id/provider_account_id）+ 状态下拉筛选 + 行内启停按钮；「登录获取账号」仅 A 两网关显示（data-show=a）；导入 JSON 区 Toggle 折叠。
+- **模型与用量**：余额改进度条（.bar，<20% 红 / <50% 金，四网关各自协议文本不变）；用量 KPI 卡；模型清单 chips 化。
+- **监控**：四网关卡片网格（.gwcard，状态色条，整卡可点击跳转对应网关视图）+ 全局批量签到 + 杀开关徽章（阻断=红/关闭=绿）。
+- **工程校验**：node --check 通过；脚本交叉校验 app.js 引用的 70 个 DOM id 全部存在于 index.html；本地 http.server + 浏览器代理实测七项（导航/页签/空态/深色主题/视图切换）全部通过后修复最后一项（accounts-grid 初始占位文案）。
+- **部署**：UI 仓 push（b69199a + 092098d release.json 0.2.0）→ uipush.py SFTP 同步 4 个静态文件至 /opt/multi-gateway-proxy-ui-static → 公网 https 18443 实测返回新版 HTML/JS，healthz 200。后端镜像未动（后端仓无改动，UI 由 nginx 静态托管不进镜像）。styles.css 顺带清理 #1f3busy 笔误。
+
 ## 性能（实测，非容量承诺）
 
 | 负载 | 总请求 | 客户端在途峰值 | 总QPS | 总延迟p50/p95 ms | 失败率 |
