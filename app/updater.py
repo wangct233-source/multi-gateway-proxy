@@ -98,6 +98,11 @@ class Updater:
     def status(self):
         result = dict(self.current)
         host_status = self._load(self.status_file)
+        if host_status and host_status.get("image") and host_status["image"] != self.running_image():
+            # Stale host status from an image that is no longer running (e.g. a
+            # manual rollback rewrote MGP_IMAGE): ignoring it prevents an old
+            # "applied" from permanently masking the real check/apply state.
+            host_status = None
         if host_status:
             result.update(host_status)
         if self.request_file.exists():

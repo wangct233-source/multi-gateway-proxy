@@ -489,6 +489,39 @@ class UnitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(failed["state"], "failed")
             self.assertEqual(failed["last_error"], "fetch_or_validation_failed")
 
+    async def test_update_stale_host_status_is_ignored(self):
+        # 手动回滚改写 MGP_IMAGE 后，旧状态文件不得再遮盖真实状态（云端实测教训）。
+        from app.updater import Updater
+        with tempfile.TemporaryDirectory() as directory:
+            state_file = Path(directory) / "update-state.json"
+            up = Updater(repo_dir=Path(directory), state_file=state_file, repo_slug="o/r",
+                         enabled=True, auto_apply=False)
+            current, remote = "a" * 40, "b" * 40
+            running = "ghcr.io/o/r:sha-" + current
+            # 状态文件来自一个已不在运行的旧镜像：必须被忽略。
+            (up.status_file).write_text(json.dumps({
+                "state": "applied", "commit": "c" * 40,
+                "image": "ghcr.io/o/r:sha-" + "c" * 40}), encoding="utf-8")
+            with patch.object(up, "_current_commit", lambda: current), \
+                 patch.object(up, "_remote_head", lambda: (remote, "new feature")), \
+                 patch.object(up, "running_image", lambda: running):
+                available = await up.check()
+                self.assertEqual(available["state"], "available")
+                armed = await up.apply()
+                self.assertEqual(armed["state"], "applying")
+            request = json.loads(up.request_file.read_text(encoding="utf-8"))
+            self.assertEqual(request["target"], remote)
+            up.request_file.unlink()
+            with patch.object(up, "running_image", lambda: running):
+                # 状态文件不带 image 字段（旧格式）时保持原行为：仍然采纳。
+                (up.status_file).write_text(json.dumps({"state": "applied", "commit": remote}), encoding="utf-8")
+                self.assertEqual(up.status()["state"], "applied")
+                # 状态文件镜像与运行镜像一致时仍然采纳。
+                (up.status_file).write_text(json.dumps({
+                    "state": "applied", "commit": remote,
+                    "image": running}), encoding="utf-8")
+                self.assertEqual(up.status()["state"], "applied")
+
 
 if __name__ == "__main__":
     unittest.main()
