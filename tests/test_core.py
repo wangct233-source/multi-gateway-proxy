@@ -488,6 +488,15 @@ class UnitTests(unittest.IsolatedAsyncioTestCase):
                 failed = await up4.check()
             self.assertEqual(failed["state"], "failed")
             self.assertEqual(failed["last_error"], "fetch_or_validation_failed")
+            # apply() must arm in the same call when a masked candidate emerges
+            # after the re-check (previously it returned "available" unarmed).
+            up4.request_file.unlink(missing_ok=True)
+            with patch.object(up4, "_current_commit", lambda: current), \
+                 patch.object(up4, "_remote_head", lambda: (remote, "masked")), \
+                 patch.object(up4, "running_image", lambda: "ghcr.io/o/r:sha-" + current):
+                armed_now = await up4.apply()
+            self.assertEqual(armed_now["state"], "applying")
+            self.assertEqual(json.loads(up4.request_file.read_text(encoding="utf-8"))["target"], remote)
 
     async def test_update_stale_host_status_is_ignored(self):
         # 手动回滚改写 MGP_IMAGE 后，旧状态文件不得再遮盖真实状态（云端实测教训）。
@@ -565,6 +574,14 @@ class UnitTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(changed.locked("5.6.7.8"))
             changed.note_success("1.2.3.4")
             self.assertFalse(changed.locked("1.2.3.4"))
+            # 失败记录表有上限：海量一次性 IP 不撑爆内存，且锁定条目不被清理。
+            changed._fails.clear()
+            changed.note_failure("locked-ip")
+            changed._fails["locked-ip"][1] = __import__("time").time() + 999
+            for i in range(5000):
+                changed.note_failure(f"scan-{i}")
+            self.assertLessEqual(len(changed._fails), 4096)
+            self.assertIn("locked-ip", changed._fails)
             await db.close()
 
 

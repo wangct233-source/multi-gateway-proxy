@@ -70,6 +70,11 @@ class AdminAuth:
         if entry[0] >= FAIL_LIMIT:
             entry[0] = 0
             entry[1] = time.time() + LOCK_SECONDS
+        if len(self._fails) > 4096:
+            # 公网扫描器会制造大量一次性 IP；只清理未锁定的旧条目防无界增长。
+            now = time.time()
+            for key in [k for k, v in self._fails.items() if v[1] <= now][:1024]:
+                self._fails.pop(key, None)
 
     def note_success(self, ip: str):
         self._fails.pop(ip, None)

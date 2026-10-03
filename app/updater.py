@@ -177,7 +177,13 @@ class Updater:
             if state == "applying":
                 return self.status()
             if state != "available":
-                return await self._check_locked()
+                # A stale/finished host record can mask the real state; re-check
+                # first and arm in the same call when a candidate emerges.
+                # Previously this returned "available" without arming, forcing a
+                # second apply click (observed on the cloud deployment).
+                state = (await self._check_locked()).get("state")
+                if state != "available":
+                    return self.status()
             return await self._arm(self.current)
 
     async def _arm(self, update):
