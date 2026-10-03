@@ -47,6 +47,14 @@
 
 **镜像级自动更新（替代源码热更新）**：GitHub Actions 在每次 main push 后自动构建完整镜像并发布 ghcr.io（tags: sha-<full-commit> 与 latest），依赖全部打进镜像——requirements.txt 变化不再阻断更新。容器内 updater 改为镜像模式：check 经公开 GitHub API 比对远端 main；apply 向数据卷写 image-update-request.json；宿主机 cron 脚本（每分钟，flock 防重叠）拉取对应 sha 镜像 → 写 .env MGP_IMAGE → compose 重建（docker stop 620s 宽限内 supervisor 优雅排空在途流）→ 健康检查 → 成功写 image-update-status.json 并自动清理旧镜像（保留 2 个），失败自动回退上一个镜像。云端实测：CI 构建成功（run 37029891837）、ghcr 匿名拉取通过、容器切换至 ghcr 镜像 0569de0、check=up_to_date、fixture 与真实上游冒烟正常。单测 13 项全过（apply 死锁修复：锁内复检改用 _check_locked）。首次部署踩坑记录：宿主机源码目录停在 ecb938d 旧 compose（硬编码镜像名）导致切换无效，已从镜像内提取新 compose 修复——镜像模式下宿主机只需 compose 文件与 .env。
 
+## G3/G4 原生协议移植（2026-10-03，新增）
+
+**G3 b-remote（a2f9902，新 Python 实现，机制源自 trae-反代 只读参考）**：两步会话协议——`POST /chat_sessions`（flatten_query 拍平消息、agent_type/agent_id=solo_agent_remote、common_params 含 token+uid 稳定派生 device_id）→ `GET /chat_sessions/{id}/events?reply_to_message_id=` 读私有事件帧。网关侧把累积快照 message 事件计算为文本增量，heartbeat 转 SSE 注释帧，token_usage 映射 usage，done 缺失按不完整回合报错而非伪装成功。认证 `Cloud-IDE-JWT`，origin/referer 按 solo.trae.cn。
+
+**G4 c-anthropic（同 commit）**：OpenAI↔Anthropic Messages 双向转换——system 抽取、tool_calls↔tool_use、tool↔tool_result、流式 content_block_delta(text_delta/input_json_delta)→chunk 增量、stop_reason 映射（end_turn→stop、tool_use→tool_calls、max_tokens→length）。双认证头 x-api-key+Bearer，anthropic-version 2023-06-01；签名路径按源码 fail-open 事实仅走免签 LLM 主路径。
+
+**测试与部署**：单测 19 项全过（新增 6 项协议测试，含跨传输块 UTF-8 行解析——发现并修复逐块 decode 截断缺陷，改为字节级缓冲）；`scripts/native_acceptance.py` 本机四场景全绿（G3/G4 流式+非流式+工具调用，快照无重复累积）；mock_upstream 增加 chat_sessions/messages 模拟（并修复 keep-alive 下 POST body 未消费导致的连接错位）。部署链路随外部会话的 v1.0 镜像模式演进：push→GHA build-image→云端拉 GHCR 镜像 sha-a2f9902 重建 app 与 fixture（MGP_IMAGE 已固化进云端 .env；fixture 曾误用旧 local 镜像致新 mock 路由缺失，已换同版本镜像）。云端实测：四网关 ready；G3/G4 经 /v3 /v4 公网数据面流式+非流式返回正确 OpenAI 格式。**状态：mock 验证通过；真实 Trae/Zcode 上游未接（等待用户提供真实账号）**。B/C 出口改 direct://local（容器启动早于 fixture 的首轮检查失败会 60s 隔离后自愈）。
+
 ## 性能（实测，非容量承诺）
 
 | 负载 | 总请求 | 客户端在途峰值 | 总QPS | 总延迟p50/p95 ms | 失败率 |
