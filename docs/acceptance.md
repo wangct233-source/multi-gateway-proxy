@@ -91,6 +91,15 @@
 - **第二层修复（5951134）**：cc6adf4 上线后再次实测发现同类残留——cron 应用成功后留下的 applied 状态文件（image 与运行一致，不会被第一层 guard 过滤）在**下一次**上游有新版本时照样遮盖 available，apply 拒绝武装（73ed9b4 的 apply 被吞，容器停在 cc6adf4）。修复：`_check_locked` 发现 available 时删除已被取代的旧 applied 状态文件。云端全链路复验：5951134 部署后 push 文档提交，**未做任何手工清理**，check=available（旧 applied 自动清除）→ apply=applying → applied，容器切至 sha-5951134、healthz 200；再 check 报 applied/commit=5951134（此时 applied 记录与运行版本一致，语义正确）。
 - **附注**：容器重建后 b/c 网关显示 paused——其 EGRESS_CHECK_URL=127.0.0.1:18080/healthz 指向 fixture 容器内的 mock 上游，app 容器自身 loopback 不可达，属如实上报（b/c 本就待真实账号/上游），与本轮改动无关；接入真实上游后自愈。
 
+## 管理页密码登录（2026-10-03，88b07a8 / ui e92a6c7 v0.3.0，按用户要求取消 token 输入）
+
+- **需求**：用户要求取消"管理 token 粘贴"，改为访问网页输密码，默认 `admin`，进去后可在设置页修改。
+- **后端（88b07a8）**：新 `app/admin_auth.py`——密码哈希（每安装随机 salt + sha256）存新 `admin_auth` 单行表（SCHEMA 追加式，老代码/回滚兼容；曾试复用 settings 表被外键拒绝）。`admin()` 双钥匙：网页密码或 env `ADMIN_TOKEN`（保留为应急主钥匙，忘记密码可救援）。`POST /api/v1/auth/login`（公网暴露+默认弱密码的爆破防护：同 IP 连续错 5 次锁 60 秒，内存态）与 `POST /api/v1/auth/password`（需当前密码，新密码 6-128 位，落库即时生效）。数据面 DATA_TOKENS 不变。
+- **前端（ui e92a6c7，v0.3.0）**：连接条改「管理密码」登录框（默认密码提示+锁定提示）；设置页新增「修改管理密码」卡片（当前/新/确认 + 默认密码黄色徽章，登录发现默认密码弹红色警示 toast）；修掉账号卡片渲染 `choice` 作用域错误（上轮引入，浏览器实测抓到）。
+- **验证**：单测 22 项全过（新增 AdminAuth 播种/持久化/改密/锁定用例）。本地全栈（18083+18081）API 级全流程：admin 登录 200+default_password=true、错密码 401、改密后旧密码 401/新密码 200、5 连错后正确密码也 429、master 钥匙不受锁定影响；浏览器端到端七步全过（错误提示/登录/徽章/改密/新密码复登/旧密码拒绝）。顺带修正 local_test.py 四网关同值测试令牌触发跨网关凭据复用保护的问题（改为按网关区分），旧的 runtime/local/proxy.db 被幽灵句柄锁死删不掉，本地测试改用独立库文件。
+- **云端**：check=available → apply → applied（全程无手工干预，验证了上轮自愈修复），容器切至 sha-88b07a8。实测：`admin` 登录 200（default_password=true）、错密码 401、密码可当 Bearer 用、master 钥匙仍可用、18443 返回 v0.3.0 登录界面。**云服务器当前就是默认密码 admin，等用户在设置页自行修改**。
+
+
 
 
 ## 性能（实测，非容量承诺）
