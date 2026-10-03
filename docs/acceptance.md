@@ -65,6 +65,13 @@
 - **一键批量签到**：POST /api/v1/tasks/batch-run 逐网关执行，各网关用各自的策略间隔错峰（CodeBuddy 45s / Trae 60s / Zcode 30s + 0~25% 抖动）；仍受杀开关/证据/窗口/每日限额约束（云端实测杀开关开启时 403）；UI 任务页新增批量按钮。claim/activity 仍 501 evidence_required。
 - **测试**：单测 20 项全过（新增策略隔离+分类+退避递增+封顶+三形态错误提取）；native_acceptance 四场景回归全绿；云端部署 97f4b36 镜像实测四网关 ready、门禁 403、G1 真实链路 401（预期）、G3 mock 流式正常。
 
+## 网关面板化（2026-10-03，b2cd598，学 A 原面板 dashboard.html 机制）
+
+- **命名**：A-1 腾讯国内 / A-2 腾讯国际 / B TRAE CN / C Zcode（config.py GATEWAYS，全链路生效——云端实测 /api/v1/gateways 返回新名）。
+- **用量统计**：`GET /api/v1/gateways/{id}/usage`（admin）——request_logs 聚合 24h 总数/成功/失败/流式/平均耗时/成功率 + 错误分类 Top10 + 最近 50 条 + 配置模型清单 + 模型冷却倒计时。云端实测 a-cn：2220 请求、成功率 99.55%（历史压测残留数据，符合预期）。
+- **上游余额查询**：`GET …/credits`（仅 a 模式）——学 A 的 fetch_credits：POST {billing 域}/v2/billing/meter/get-user-resource（billing 与 chat 域分离：国内 www.codebuddy.cn），billing 身份头（X-User-Id/X-Machine-ID/X-Session-ID 派生），聚合套餐 remain/used/size，5 分钟缓存 + 每次仅占一个账号租约。云端实测假 token 返回 401 透传（真实链路通）；B 返回 501 evidence_required（Trae 余额协议无证据，不冒充）。
+- **UI**：新「模型与用量」页签（KPI 卡 + 模型表 + 最近请求表 + 模型冷却提示 + 余额查询按钮仅 A 网关显示）；任务页新增每网关「立即签到 / 领取奖励」按钮（真实执行，claim 缺证据如实 501）。UI 文件已同步服务器 18443。
+
 ## 性能（实测，非容量承诺）
 
 | 负载 | 总请求 | 客户端在途峰值 | 总QPS | 总延迟p50/p95 ms | 失败率 |
