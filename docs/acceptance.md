@@ -88,6 +88,9 @@
 - **根因**：`data/image-update-status.json` 是 01:30 cron 应用 d44e6ac 时写的；随后上个会话手动把 `.env` MGP_IMAGE 改回 sha-ae7e7ea 重建（04:56Z），未删状态文件。`Updater.status()` 无条件合并 host 状态 → 旧的 applied 永久遮盖真实状态；`apply()` 见非 available 只重新 check 永不武装——更新链路被卡死。
 - **修复（cc6adf4）**：`status()` 只在 host 状态文件的 image 与运行镜像（MGP_IMAGE）一致时才采纳；不一致视为过期忽略（不带 image 字段的旧格式保持原行为）。新增单测 test_update_stale_host_status_is_ignored，21 项全过。
 - **云端解锁与实测**：备份并删除过期状态文件（image-update-status.json.bak-stale-20261003）→ check=available（candidate=cc6adf4）→ apply=applying → 约 2 分钟后 applied，容器切至 sha-cc6adf4、healthz 200、四网关 ready、18443 返回重构后新 UI。本轮验证了「手动回滚后更新链路仍可用」，修复后此类操作不再需要手工清状态文件。
+- **第二层修复（5951134）**：cc6adf4 上线后再次实测发现同类残留——cron 应用成功后留下的 applied 状态文件（image 与运行一致，不会被第一层 guard 过滤）在**下一次**上游有新版本时照样遮盖 available，apply 拒绝武装（73ed9b4 的 apply 被吞，容器停在 cc6adf4）。修复：`_check_locked` 发现 available 时删除已被取代的旧 applied 状态文件。云端全链路复验：5951134 部署后 push 文档提交，**未做任何手工清理**，check=available（旧 applied 自动清除）→ apply=applying → applied，容器切至 sha-5951134、healthz 200；再 check 报 applied/commit=5951134（此时 applied 记录与运行版本一致，语义正确）。
+- **附注**：容器重建后 b/c 网关显示 paused——其 EGRESS_CHECK_URL=127.0.0.1:18080/healthz 指向 fixture 容器内的 mock 上游，app 容器自身 loopback 不可达，属如实上报（b/c 本就待真实账号/上游），与本轮改动无关；接入真实上游后自愈。
+
 
 
 ## 性能（实测，非容量承诺）
