@@ -160,6 +160,11 @@ class Updater:
             update = {"state": "failed", "last_error": "fetch_or_validation_failed", "checked_at": time.time()}
         self.current.update(update)
         self._save_current()
+        if update["state"] == "available":
+            # A fresh "available" supersedes the previous transition's applied
+            # record; leaving it in place would mask this check and make apply()
+            # refuse to arm (observed on the cloud deployment).
+            self.status_file.unlink(missing_ok=True)
         if update["state"] == "available" and self.auto_apply:
             return await self._arm(update)
         return self.status()

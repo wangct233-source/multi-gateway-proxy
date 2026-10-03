@@ -521,6 +521,15 @@ class UnitTests(unittest.IsolatedAsyncioTestCase):
                     "state": "applied", "commit": remote,
                     "image": running}), encoding="utf-8")
                 self.assertEqual(up.status()["state"], "applied")
+                # 但新一轮 check 发现更新时，旧 applied 必须被清除，不再遮盖。
+                with patch.object(up, "_current_commit", lambda: current), \
+                     patch.object(up, "_remote_head", lambda: (remote, "newer")):
+                    fresh = await up.check()
+                self.assertEqual(fresh["state"], "available")
+                self.assertFalse(up.status_file.exists())
+                armed = await up.apply()
+                self.assertEqual(armed["state"], "applying")
+                up.request_file.unlink()
 
 
 if __name__ == "__main__":
