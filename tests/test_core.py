@@ -531,6 +531,41 @@ class UnitTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(armed["state"], "applying")
                 up.request_file.unlink()
 
+    async def test_admin_auth_password_login_and_lockout(self):
+        from app.admin_auth import AdminAuth
+        from app.db import Database, Repository
+        # Windows 上 SQLite 句柄释放晚于 TemporaryDirectory 清理，忽略清理期报错。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            db = Database(Path(directory) / "test.db")
+            await db.start()
+            repo = Repository(db)
+            auth = AdminAuth()
+            await auth.load(repo)
+            # 首次启动播种默认密码 admin。
+            self.assertTrue(auth.is_default)
+            self.assertTrue(auth.verify("admin"))
+            self.assertFalse(auth.verify("wrong"))
+            # 重启后仍然有效（admin_auth 表持久化）。
+            reloaded = AdminAuth()
+            await reloaded.load(repo)
+            self.assertTrue(reloaded.verify("admin"))
+            # 修改密码：新密码生效、旧密码失效、不再是默认态。
+            reloaded.set_password("newpass123")
+            await reloaded.save(repo)
+            changed = AdminAuth()
+            await changed.load(repo)
+            self.assertFalse(changed.is_default)
+            self.assertTrue(changed.verify("newpass123"))
+            self.assertFalse(changed.verify("admin"))
+            # 防爆破：同 IP 连续错 5 次锁 60 秒；别的 IP 不受影响；成功即解锁。
+            for _ in range(5):
+                changed.note_failure("1.2.3.4")
+            self.assertTrue(changed.locked("1.2.3.4"))
+            self.assertFalse(changed.locked("5.6.7.8"))
+            changed.note_success("1.2.3.4")
+            self.assertFalse(changed.locked("1.2.3.4"))
+            await db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

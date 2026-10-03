@@ -74,6 +74,8 @@ class State:
         self.config = config
         self.db = Database(config.database)
         self.repository = Repository(self.db)
+        from .admin_auth import AdminAuth
+        self.admin_auth = AdminAuth()
         self.runtimes = {gid: Runtime(cfg, config, self.repository) for gid, cfg in config.gateways.items()}
         self.tasks = TaskGuard(config, self.runtimes)
         from .tasks.checkin import CheckinExecutor
@@ -88,6 +90,7 @@ class State:
     async def start(self):
         await self.db.start()
         await self.repository.seed(self.config.gateways)
+        await self.admin_auth.load(self.repository)
         for gid, runtime in self.runtimes.items():
             settings = await self.repository.settings(gid)
             apply_settings(runtime, settings)
@@ -245,7 +248,15 @@ def _jwt_exp(token: str) -> float | None:
 
 
 def admin(request):
-    return authorized(request, (request.app.state.runtime.config.admin_token,))
+    """管理鉴权：网页登录密码（DB 哈希）或 env ADMIN_TOKEN 应急钥匙任一通过。"""
+    state = request.app.state.runtime
+    header = request.headers.get("authorization", "")
+    supplied = header[7:] if header.startswith("Bearer ") else ""
+    if not supplied:
+        return False
+    if state.config.admin_token and hmac.compare_digest(supplied.encode(), state.config.admin_token.encode()):
+        return True
+    return state.admin_auth.verify(supplied)
 
 
 async def limited_json(request, limit):
@@ -943,6 +954,45 @@ async def version(request):
     return JSONResponse({"version": VERSION, "updates": state.updater.status()})
 
 
+async def auth_login(request):
+    """管理页登录：验证密码；连续错 5 次锁 60 秒（按来源 IP）。"""
+    state = request.app.state.runtime
+    ip = request.client.host if request.client else "?"
+    if state.admin_auth.locked(ip):
+        return error(429, "too_many_attempts", "Too many failed attempts; try again in a minute")
+    try:
+        body = await limited_json(request, 4096)
+    except (ValueError, AttributeError):
+        return error(400, "invalid_request", "JSON object required")
+    if not isinstance(body, dict) or not state.admin_auth.verify(str(body.get("password") or "")):
+        state.admin_auth.note_failure(ip)
+        return error(401, "unauthorized", "Wrong password")
+    state.admin_auth.note_success(ip)
+    return JSONResponse({"ok": True, "default_password": state.admin_auth.is_default})
+
+
+async def auth_password(request):
+    """修改管理密码：需携带当前密码；新密码哈希落库并即时生效。"""
+    state = request.app.state.runtime
+    if not admin(request):
+        return error(401, "unauthorized", "Admin password required")
+    try:
+        body = await limited_json(request, 4096)
+    except (ValueError, AttributeError):
+        return error(400, "invalid_request", "JSON object required")
+    if not isinstance(body, dict):
+        return error(400, "invalid_request", "JSON object required")
+    old = str(body.get("old_password") or "")
+    new = str(body.get("new_password") or "")
+    if not state.admin_auth.verify(old):
+        return error(403, "wrong_old_password", "Old password does not match")
+    if len(new) < 6 or len(new) > 128:
+        return error(400, "weak_password", "New password must be 6-128 characters")
+    state.admin_auth.set_password(new)
+    await state.admin_auth.save(state.repository)
+    return JSONResponse({"ok": True, "default_password": state.admin_auth.is_default})
+
+
 def create_app(config=None):
     config = config or Config.from_env()
     state = State(config)
@@ -969,6 +1019,8 @@ def create_app(config=None):
         Route("/api/v1/tasks/kill-switch", kill_switch, methods=["GET", "POST"]),
         Route("/api/v1/tasks/batch-run", batch_run, methods=["POST"]),
         Route("/api/v1/version", version),
+        Route("/api/v1/auth/login", auth_login, methods=["POST"]),
+        Route("/api/v1/auth/password", auth_password, methods=["POST"]),
         Route("/api/updates/{action}", update_route, methods=["GET", "POST"]),
         Route("/gw/{gateway_id}/{path:path}", proxy, methods=["GET", "POST"]),
         WebSocketRoute("/gw/{gateway_id}/{path:path}", websocket),

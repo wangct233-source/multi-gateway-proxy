@@ -37,6 +37,9 @@ CREATE INDEX IF NOT EXISTS request_log_date ON request_logs(created_at);
 CREATE TABLE IF NOT EXISTS settings(
  gateway_id TEXT NOT NULL REFERENCES gateways(id), key TEXT NOT NULL, value_json TEXT NOT NULL,
  PRIMARY KEY(gateway_id,key));
+CREATE TABLE IF NOT EXISTS admin_auth(
+ id INTEGER PRIMARY KEY CHECK(id=1), password_salt TEXT NOT NULL, password_hash TEXT NOT NULL,
+ updated_at REAL NOT NULL);
 """
 
 # v2: accounts 增加 secret_inline（导入的真实凭据）。
