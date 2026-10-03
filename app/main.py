@@ -18,14 +18,15 @@ import psutil
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, WebSocketRoute
 
 from .config import Config
 from .core.concurrency import AdmissionError, GatewayGate
-from .core.streaming import UpstreamResponse
+from .core.streaming import GeneratorResponse, UpstreamResponse
 from .db import Database, Repository
 from .egress.pool import EgressPool
+from .gateways import b_protocol, c_protocol
 from .gateways.base import EvidenceError, GatewayAdapter, error, upstream_url
 from .pool.lease_manager import AccountPool
 from .tasks.scheduler import TaskGuard
@@ -193,7 +194,10 @@ async def proxy(request: Request):
         return error(400, "invalid_path", "Gateway prefix must be stripped exactly once")
     if request.method == "GET" and path == "v1/models":
         return JSONResponse({"object": "list", "data": [{"id": m, "object": "model"} for m in runtime.config.models]})
-    if request.method != "POST" or path != "v1/chat/completions" or runtime.config.mode not in {"openai", "a"}:
+    native_modes = {"b-remote", "c-anthropic"}
+    native_ok = runtime.config.mode in native_modes and getattr(runtime.adapter, "protocol", "") == runtime.config.mode
+    if request.method != "POST" or path != "v1/chat/completions" or (
+            runtime.config.mode not in {"openai", "a"} and not native_ok):
         return error(501, "evidence_required", "Provider protocol is not implemented/verified in this Python build",
                      missing_evidence=["Authorized current protocol samples", "Python converter regression tests"])
     if state.draining or state.db.last_error:
@@ -249,6 +253,57 @@ async def proxy(request: Request):
         lease = await runtime.pool.acquire(session_key)
         if not lease:
             return error(429, "no_account_capacity", "No enabled account with credential and available lease")
+        adapter_protocol = getattr(runtime.adapter, "protocol", "")
+        if adapter_protocol == "b-remote":
+            # G3 两步会话协议：create_session(JSON) → events(SSE) → OpenAI 流。
+            url, headers, data = runtime.adapter.session_request(payload, lease)
+            async with asyncio.timeout(state.config.connect_timeout + state.config.stream_idle):
+                outbound = exit.client.build_request("POST", url, headers=headers, json=data)
+                session_response = await exit.client.send(outbound)
+            if session_response.status_code >= 400:
+                code = session_response.status_code
+                await runtime.pool.report(lease, code)
+                raw = await session_response.aread()
+                await session_response.aclose()
+                return error(502, "upstream_session_failed",
+                             "Trae session creation failed", upstream_status=code,
+                             detail=raw[:300].decode("utf-8", errors="replace"))
+            try:
+                session_payload = session_response.json()
+            except ValueError:
+                session_payload = {}
+            await session_response.aclose()
+            session_id, message_id = b_protocol.parse_session_response(session_payload)
+            if not session_id or not message_id:
+                raise ValueError("trae session response missing ids")
+            events_url, events_headers = runtime.adapter.events_request(lease, session_id, message_id)
+            async with asyncio.timeout(state.config.connect_timeout + state.config.stream_idle):
+                outbound = exit.client.build_request("GET", events_url, headers=events_headers)
+                events_response = await exit.client.send(outbound, stream=True)
+            code = events_response.status_code
+            await runtime.pool.report(lease, code)
+            if events_response.status_code >= 400:
+                raw = await events_response.aread()
+                await events_response.aclose()
+                return error(502, "upstream_events_failed", "Trae event stream failed", upstream_status=code,
+                             detail=raw[:300].decode("utf-8", errors="replace"))
+            source = b_protocol.parse_event_frames(events_response)
+            model = str(payload.get("model") or "auto")
+            if not payload.get("stream"):
+                # 非流式：网关侧消费事件流（有界）合成 OpenAI JSON。
+                try:
+                    async with asyncio.timeout(state.config.stream_total):
+                        raw = await b_protocol.events_to_single(source, model)
+                except ValueError as exc:
+                    return error(502, "upstream_stream_failed", str(exc)[:200])
+                finally:
+                    await events_response.aclose()
+                await cleanup("completed")
+                return Response(raw, media_type="application/json")
+            openai_stream = b_protocol.events_to_openai(source, model)
+            transformed = GeneratorResponse(openai_stream, cleanup, state.config.stream_total, state.config.stream_idle)
+            transferred = True
+            return transformed
         url, headers, data = runtime.adapter.prepare(path, payload, lease)
         for attempt in range(2):
             try:
@@ -264,6 +319,30 @@ async def proxy(request: Request):
                 exit = alternate
         code = response.status_code
         await runtime.pool.report(lease, code)
+        if adapter_protocol == "c-anthropic":
+            # G4：Anthropic 请求/响应双向转换；流式逐事件翻译，不整包缓冲。
+            model = str(payload.get("model") or "")
+            if response.status_code >= 400:
+                raw = await response.aread()
+                await response.aclose()
+                await cleanup("upstream_error")
+                return Response(content=raw, status_code=code,
+                                media_type=response.headers.get("content-type", "application/json"))
+            if payload.get("stream"):
+                stream = c_protocol.anthropic_sse_to_openai(response.aiter_raw(), model)
+                transformed = GeneratorResponse(stream, cleanup, state.config.stream_total, state.config.stream_idle)
+                transferred = True
+                return transformed
+            raw = await response.aread()
+            await response.aclose()
+            if len(raw) > state.config.body_limit:
+                raise ValueError("anthropic response too large")
+            try:
+                openai_body = c_protocol.anthropic_to_openai(json.loads(raw), model)
+            except ValueError:
+                raise ValueError("invalid anthropic response")
+            await cleanup("completed")
+            return JSONResponse(openai_body)
         transformed = UpstreamResponse(response, cleanup, state.config.stream_total, state.config.stream_idle)
         transferred = True
         return transformed

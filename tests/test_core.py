@@ -253,6 +253,133 @@ class UnitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(public["source"], "imported")
             await db.close()
 
+    def test_b_protocol_two_step(self):
+        from app.gateways import b_protocol
+        from app.gateways.b import BAdapter
+        cfg = GatewayConfig("b", "B", "B", upstream_url="https://trae-api-cn.mchost.guru/api/remote/v1", mode="b-remote")
+        class Lease:
+            account = {"provider_account_id": "acc-1"}
+            token = "trae-jwt-token"
+        adapter = BAdapter(cfg)
+        url, headers, body = adapter.session_request({"model": "doubao", "messages": [
+            {"role": "system", "content": "你是助手"},
+            {"role": "user", "content": "你好"}]}, Lease())
+        self.assertEqual(url, "https://trae-api-cn.mchost.guru/api/remote/v1/chat_sessions")
+        self.assertTrue(headers["Authorization"].startswith("Cloud-IDE-JWT "))
+        self.assertEqual(headers["Origin"], "https://solo.trae.cn")
+        initial = body["initial_message"]
+        self.assertEqual(initial["agent_type"], "solo_agent_remote")
+        query = json.loads(initial["query"])
+        self.assertIn("[System]\n你是助手", query[0]["data"]["content"])
+        self.assertIn("你好", query[0]["data"]["content"])
+        common = json.loads(initial["common_params"])
+        self.assertEqual(common["device_id"], b_protocol.device_id_for("trae-jwt-token", "acc-1"))
+        events_url, _ = adapter.events_request(Lease(), "sid-1", "mid-1")
+        self.assertEqual(events_url, "https://trae-api-cn.mchost.guru/api/remote/v1/chat_sessions/sid-1/events?reply_to_message_id=mid-1")
+
+    async def test_b_event_stream_conversion(self):
+        from app.gateways import b_protocol
+
+        async def source():
+            yield "heartbeat", {}
+            yield "message", {"message": {"content": "你好"}}
+            yield "message", {"message": {"content": "你好，世界。"}}  # 累积快照 → 增量
+            yield "token_usage", {"usage": {"prompt_tokens": 8, "completion_tokens": 6, "total_tokens": 14}}
+            yield "done", {"reason": "stop"}
+
+        chunks = []
+        async for piece in b_protocol.events_to_openai(source(), "doubao"):
+            chunks.append(piece)
+        text = b"".join(chunks).decode()
+        self.assertIn("你好", text)
+        self.assertIn("，世界。", text)
+        self.assertNotIn("你好你好", text.replace('\\n', ''))  # 快照不得重复累积
+        self.assertIn('"finish_reason":"stop"', text)
+        self.assertIn("data: [DONE]", text)
+        self.assertIn('"prompt_tokens":8', text)
+
+    async def test_b_event_frame_parser(self):
+        from app.gateways import b_protocol
+
+        class FakeResponse:
+            async def aiter_bytes(self):
+                yield b'event: message\ndata: {"message":{"content":"\xe4\xbd'  # 跨块 UTF-8
+                yield b'\xa0\xe5\xa5\xbd"}}\n\n'  # 好
+                yield b"data: [DONE]\n\n"
+
+        events = []
+        async for event in b_protocol.parse_event_frames(FakeResponse()):
+            events.append(event)
+        self.assertEqual(events[0][0], "message")
+        self.assertEqual(events[0][1]["message"]["content"], "你好")
+        self.assertEqual(events[1], ("done", {}))
+
+    def test_c_protocol_request_conversion(self):
+        from app.gateways import c_protocol
+        from app.gateways.c import CAdapter
+        payload = {"model": "glm-4.7", "messages": [
+            {"role": "system", "content": "be brief"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": '{"q":"x"}'}}]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "result"}],
+            "max_tokens": 100, "temperature": 0.5}
+        body = c_protocol.openai_to_anthropic(payload)
+        self.assertEqual(body["system"], "be brief")
+        self.assertEqual(body["max_tokens"], 100)
+        self.assertEqual(body["messages"][1]["content"][0]["type"], "tool_use")
+        self.assertEqual(body["messages"][2]["content"][0]["type"], "tool_result")
+        cfg = GatewayConfig("c", "C", "C", upstream_url="https://api.z.ai/api/anthropic", mode="c-anthropic")
+        class Lease:
+            account = {}
+            token = "key123.secret456"
+        url, headers, converted = CAdapter(cfg).prepare("v1/chat/completions", payload, Lease())
+        self.assertEqual(url, "https://api.z.ai/api/anthropic/v1/messages")
+        self.assertEqual(headers["x-api-key"], "key123.secret456")
+        self.assertEqual(headers["anthropic-version"], "2023-06-01")
+
+    async def test_c_anthropic_sse_conversion(self):
+        from app.gateways import c_protocol
+
+        def frame(event, data):
+            return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+
+        async def byte_stream():
+            for piece in [frame("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                                        "delta": {"type": "text_delta", "text": "你好"}}),
+                          frame("content_block_start", {"type": "content_block_start", "index": 1,
+                                                        "content_block": {"type": "tool_use", "id": "t1", "name": "lookup"}}),
+                          frame("content_block_delta", {"type": "content_block_delta", "index": 1,
+                                                        "delta": {"type": "input_json_delta", "partial_json": '{"q":'}}),
+                          frame("content_block_delta", {"type": "content_block_delta", "index": 1,
+                                                        "delta": {"type": "input_json_delta", "partial_json": '"x"}'}}),
+                          frame("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use"},
+                                                  "usage": {"output_tokens": 6}}),
+                          frame("message_stop", {"type": "message_stop"})]:
+                yield piece
+
+        chunks = []
+        async for piece in c_protocol.anthropic_sse_to_openai(byte_stream(), "glm-4.7"):
+            chunks.append(piece)
+        text = b"".join(chunks).decode()
+        self.assertIn('"content":"你好"', text)
+        self.assertIn('"name":"lookup"', text)
+        self.assertIn('"finish_reason":"tool_calls"', text)
+        self.assertIn("data: [DONE]", text)
+
+    def test_c_anthropic_nonstream_conversion(self):
+        from app.gateways import c_protocol
+        anthropic = {"id": "msg_1", "type": "message", "role": "assistant", "model": "glm-4.7",
+                     "content": [{"type": "text", "text": "你好，世界。"},
+                                 {"type": "tool_use", "id": "t1", "name": "lookup", "input": {"q": "x"}}],
+                     "stop_reason": "tool_use", "usage": {"input_tokens": 8, "output_tokens": 6}}
+        openai = c_protocol.anthropic_to_openai(anthropic, "glm-4.7")
+        self.assertEqual(openai["choices"][0]["message"]["content"], "你好，世界。")
+        self.assertEqual(openai["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "lookup")
+        self.assertEqual(json.loads(openai["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]), {"q": "x"})
+        self.assertEqual(openai["choices"][0]["finish_reason"], "tool_calls")
+        self.assertEqual(openai["usage"]["total_tokens"], 14)
+
     async def test_update_image_mode_state_machine(self):
         from app.updater import Updater
         with tempfile.TemporaryDirectory() as directory:
