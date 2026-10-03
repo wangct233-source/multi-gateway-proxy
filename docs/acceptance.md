@@ -106,6 +106,15 @@
 - **入库（80860b5+c4b7f39）**：取回线上脚本做通用化（`MGP_DEPLOY_DIR`/`MGP_COMPOSE_PROJECT`/`MGP_IMAGE_REPO`/`MGP_HEALTH_URL` 环境变量配置，逻辑与线上逐行一致），落 `scripts/host-image-update.sh`（git 100755）；新增 `.gitattributes` 强制 `*.sh text eol=lf`；重写 docs/updates.md 为镜像模式并给出新服务器三条更新路径（手动 pull latest / 半自动 UI / 挂 cron 全自动）。排查插曲：PowerShell 管道会把 git 输出重编码成 CRLF，曾误判脚本为 CRLF 行尾——用 python 直接读 blob 核实为纯 LF（2919 字节）后才提交可执行位与 .gitattributes，未引入实际行尾改动。
 - **云端**：check=available → apply → applied → healthz 200，容器切至 sha-c4b7f39（自愈链路再次全程无手工干预）。
 
+## UI v0.4.0 静音控制台重构 + 总览页用量分析（2026-10-03，ui d805070）
+
+- **触发**：用户给出完整视觉 brief（"安静的调度控制台"：深墨蓝底/发丝描边/暖橙单点缀/低饱和状态色/等宽数字/极轻动效/禁霓虹渐变玻璃），并要求总览页三块用量分析（模型分布、Token 使用趋势、最近使用 Top12），明确约束"不写后端、不建表、不做数据聚合"。
+- **数据实情**：request_logs 无 model/token 列，`/usage` 仅有请求数/成功失败/最近50条/模型清单/模型冷却。三块分析按现有数据实现到最接近版本：用量趋势=各网关最近 50 条记录按小时聚合（成功/失败堆叠柱）；模型分布=各网关模型清单+冷却状态徽章；Top12=账号维度（请求数/成功率/最近活跃）。**真正的 Token 明细与按模型调用量需要后端加列记录，本轮遵守约束未做**。
+- **实现**：styles.css 全量重写（双主题 CSS 变量体系，暖橙仅用于导航指示条/主操作/焦点；rise/toast 极轻动效；prefers-reduced-motion；细滚动条）；index.html 增线性图标（symbol+use，stroke 1.5 圆头）、侧栏主题开关、三块分析容器；app.js 增主题切换（localStorage 记忆）与 loadAnalysis（四路 /usage 并取、20 秒节流、仅监控视图、与 5 秒状态轮询解耦）。
+- **修掉两个潜伏 bug**：① SVG 元素没有 hidden IDL 属性，主题图标切换失效（浏览器验收抓到，改用 class）；② 状态判断写成 `status === 'ok'`，而接口实际返回 `'ready'`——网关卡/账号卡自 v0.2.0 起一直错误显示红色"异常"。
+- **验证**：node --check + DOM id/图标引用交叉校验；本地全栈（b/c 用 b-remote/c-anthropic mock 模式，四路共 60 条真实请求）浏览器端到端两轮：三块渲染（4 行×2 模型、"24h 合计 60 请求 · 成功率 100.0%"、Top12 十二行）、暗/亮双向切换含图标、五页签与设置页回归、控制台零报错。
+- **部署**：UI 仓 d805070 推送（v0.4.0）→ uipush 同步 → 公网 18443 实测返回 v0.4.0 且 healthz 200；后端仓本次仅本文档变更。
+
 ## 性能（实测，非容量承诺）
 
 | 负载 | 总请求 | 客户端在途峰值 | 总QPS | 总延迟p50/p95 ms | 失败率 |
