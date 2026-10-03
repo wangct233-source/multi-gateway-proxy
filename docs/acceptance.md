@@ -100,9 +100,11 @@
 - **云端**：check=available → apply → applied（全程无手工干预，验证了上轮自愈修复），容器切至 sha-88b07a8。实测：`admin` 登录 200（default_password=true）、错密码 401、密码可当 Bearer 用、master 钥匙仍可用、18443 返回 v0.3.0 登录界面。**云服务器当前就是默认密码 admin，等用户在设置页自行修改**。
 - **追加修复（d2fc26a）**：a66d3b5（纯文档）更新重启后 `default_password` 变 false——is_default 标志只存内存，重启从表读回时一律当非默认。修复：is_default 不落库，每次从存储哈希反推（存的是 admin 的哈希即默认）。单测补断言，云端应用后终验 `admin` 登录 default_password=true。
 
+## 补齐宿主机更新脚本入库（2026-10-03，c4b7f39，回答"别的服务器如何跟随仓库更新"）
 
-
-
+- **背景**：用户问另一台服务器部署源码后如何更新。按代码核对：updater（镜像模式）只做 check（公开 GitHub API 比对 commit）与 apply（写 `data/image-update-request.json`），**消费请求文件的宿主机脚本不在仓库**——只存在于云端宿主机 `/opt/mgp-ops/image-update.sh`（/etc/cron.d 每分钟 flock 驱动），他人部署拿不到，docs/updates.md 还停留在废弃的源码模式描述。
+- **入库（80860b5+c4b7f39）**：取回线上脚本做通用化（`MGP_DEPLOY_DIR`/`MGP_COMPOSE_PROJECT`/`MGP_IMAGE_REPO`/`MGP_HEALTH_URL` 环境变量配置，逻辑与线上逐行一致），落 `scripts/host-image-update.sh`（git 100755）；新增 `.gitattributes` 强制 `*.sh text eol=lf`；重写 docs/updates.md 为镜像模式并给出新服务器三条更新路径（手动 pull latest / 半自动 UI / 挂 cron 全自动）。排查插曲：PowerShell 管道会把 git 输出重编码成 CRLF，曾误判脚本为 CRLF 行尾——用 python 直接读 blob 核实为纯 LF（2919 字节）后才提交可执行位与 .gitattributes，未引入实际行尾改动。
+- **云端**：check=available → apply → applied → healthz 200，容器切至 sha-c4b7f39（自愈链路再次全程无手工干预）。
 
 ## 性能（实测，非容量承诺）
 
