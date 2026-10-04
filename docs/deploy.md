@@ -37,13 +37,16 @@ mkdir -p data logs ../runtime/keys
 nano .env     # 或 vi / 宝塔文件编辑器
 ```
 
-必改一行：
+必改两行：
 
 ```
 ADMIN_TOKEN=换成一串至少24位的乱码
+MGP_IMAGE=ghcr.io/wangct233-source/multi-gateway-proxy:latest
 ```
 
-生成一串：`openssl rand -hex 24`。这是**应急主钥匙**（忘记网页密码时救援用），平时用不到，抄到笔记里保存即可。
+生成 ADMIN_TOKEN：`openssl rand -hex 24`。这是**应急主钥匙**（忘记网页密码时救援用），平时用不到，抄到笔记里保存即可。
+
+`MGP_IMAGE` 指向公开镜像——**不设的话 compose 会退回"本地构建"模式**，在没有源码的目录里必然报 `open Dockerfile: no such file or directory`。
 
 先不用动其他行：四个网关默认全部 `disabled`，第 6 步再开通。`DATA_TOKENS` 不填时自动等于 `ADMIN_TOKEN`（就是绘画工具里填的 API Key）。
 
@@ -59,6 +62,7 @@ curl http://127.0.0.1:8000/healthz # 返回 {"status":"ok",...}
 
 | 报错 | 原因与处理 |
 |---|---|
+| `open Dockerfile: no such file or directory` / `Image ... Building` | `.env` 没设 `MGP_IMAGE`，compose 退回本地构建模式 → 按第 3 步加上 `MGP_IMAGE=ghcr.io/...:latest` |
 | `ADMIN_TOKEN is required and must contain at least 24 characters` | `.env` 没建 / ADMIN_TOKEN 为空或太短 → 回第 3 步 |
 | `invalid mount config ... create_host_path` | 第 2 步目录没建全 → 补建后 `docker compose up -d` |
 | 面板里启动但行为怪异 | 面板保存的编排副本和仓库不一致 → 用第 1 步下载的正版内容替换面板里的编排 |
