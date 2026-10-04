@@ -20,7 +20,7 @@
 | Docker / GitHub | 本机无 Docker/`gh`；经用户授权在云服务器完成 Python 3.12 容器构建、健康、隔离/流式/回滚测试及 `docker stats`。GitHub 建仓与只读 deploy key 仍因本机 `gh` 缺失未执行。详见 [docs/acceptance.md](docs/acceptance.md)。 |
 | 四出口 | 四套配置/客户端不等于四个公网 IP；同宿主机默认路由或 `direct://local` 不能当成独立出口证据。 |
 
-来源许可与补证要求见 [docs/source-attribution.md](docs/source-attribution.md)；实测记录见 [docs/acceptance.md](docs/acceptance.md)；扩展边界见 [docs/scaling.md](docs/scaling.md)。当前是可运行的核心与受限适配版本，**不是四个真实厂商协议都已接通的成品**。所有云端压测用明确的 `openai` fixture 模式，没有真实账号/奖励调用。
+来源许可与补证要求见 [docs/source-attribution.md](docs/source-attribution.md)；**新手部署教程见 [docs/deploy.md](docs/deploy.md)**；实测记录见 [docs/acceptance.md](docs/acceptance.md)；扩展边界见 [docs/scaling.md](docs/scaling.md)。当前是可运行的核心与受限适配版本，**不是四个真实厂商协议都已接通的成品**。所有云端压测用明确的 `openai` fixture 模式，没有真实账号/奖励调用。
 
 ## 路由与流式契约
 
