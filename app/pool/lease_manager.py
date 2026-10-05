@@ -19,11 +19,13 @@ class Lease:
 
 
 class AccountPool:
-    def __init__(self, gid, repository, limit=2, ttl=600):
+    def __init__(self, gid, repository, limit=2, ttl=600, on_change=None):
         self.gid = gid
         self.repository = repository
         self.limit = limit
         self.ttl = ttl
+        # 账号清单变化回调（参数：启用账号数）；Runtime 用它重建并发闸门。
+        self.on_change = on_change
         self.accounts = []
         self.in_flight = {}
         self.leases = {}
@@ -35,6 +37,8 @@ class AccountPool:
         accounts = await self.repository.accounts(self.gid)
         async with self.lock:
             self.accounts = accounts
+        if self.on_change:
+            self.on_change(sum(1 for a in accounts if a["enabled"]))
 
     async def acquire(self, session_key=None, exclude=None, only_account=None):
         async with self.lock:

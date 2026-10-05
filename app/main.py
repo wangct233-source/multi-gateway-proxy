@@ -11,7 +11,6 @@ import re
 import sqlite3
 import time
 import uuid
-from dataclasses import replace
 
 import httpx
 import psutil
@@ -38,8 +37,11 @@ VERSION = "0.1.0"
 class Runtime:
     def __init__(self, cfg, global_cfg, repository):
         self.config, self.repository = cfg, repository
-        self.gate = GatewayGate(cfg.concurrency, cfg.queue_limit, cfg.queue_timeout)
+        # 闸门并发动态化：nominal_limit = 启用账号数 × 每账号并发，随账号增删自动伸缩。
+        self.gate = GatewayGate(1, cfg.queue_limit, cfg.queue_timeout)
+        self.nominal_limit = 1
         self.pool = AccountPool(cfg.id, repository, cfg.account_concurrency, global_cfg.stream_total)
+        self.pool.on_change = self.sync_gate
         self.egress = EgressPool(cfg, global_cfg)
         from .gateways.a_domestic import DomesticAdapter
         from .gateways.a_international import InternationalAdapter
@@ -52,6 +54,13 @@ class Runtime:
         self.model_cooldown = {}
         self.refresh_locks = {}
 
+    def sync_gate(self, enabled_count=None):
+        """按启用账号数重算并发上限：1 账号×2 并发=2，100 账号×5=500。"""
+        if enabled_count is None:
+            enabled_count = sum(1 for a in self.pool.accounts if a["enabled"])
+        self.nominal_limit = max(1, enabled_count * self.config.account_concurrency)
+        self.gate.limit = self.nominal_limit
+
     def model_cooling(self, model: str) -> float:
         until = self.model_cooldown.get(model, 0)
         return max(0.0, until - time.time())
@@ -61,7 +70,7 @@ class Runtime:
                          if until > time.time())
         return {"id": self.config.id, "name": self.config.name,
                 "status": "ready" if any(e.healthy for e in self.egress.exits) else "paused",
-                "concurrency": self.config.concurrency, "effective_concurrency": self.gate.limit,
+                "concurrency": self.gate.limit, "effective_concurrency": self.gate.limit,
                 "active": self.gate.active, "queued": self.gate.queued, "queue_limit": self.gate.queue_limit,
                 "accounts": len(self.pool.accounts), "egress": self.egress.public(),
                 "capabilities": self.adapter.capabilities(), "tasks_enabled": self.config.tasks_enabled,
@@ -145,7 +154,8 @@ class State:
             self.rss = process.memory_info().rss
             self.memory_pressure = self.rss > self.config.soft_memory_mb * 1048576 * self.config.memory_watermark
             for runtime in self.runtimes.values():
-                target = max(1, runtime.config.concurrency // 2) if self.memory_pressure else runtime.config.concurrency
+                # 内存压力时把动态名义并发减半；恢复后回到 nominal（账号×每账号并发）。
+                target = max(1, runtime.nominal_limit // 2) if self.memory_pressure else runtime.nominal_limit
                 if runtime.gate.limit != target:
                     await runtime.gate.resize(target, runtime.config.queue_limit, runtime.config.queue_timeout)
             await asyncio.sleep(1)
@@ -495,13 +505,13 @@ async def websocket(socket):
         await socket.close(code=1008, reason="evidence_required")
 
 
-SETTINGS_KEYS = {"concurrency", "queue_limit", "queue_timeout", "tasks_enabled", "task_window_start", "task_window_end", "task_daily_limit"}
+SETTINGS_KEYS = {"account_concurrency", "queue_limit", "queue_timeout", "tasks_enabled", "task_window_start", "task_window_end", "task_daily_limit"}
 
 
 def apply_settings(runtime, values):
     if not set(values) <= SETTINGS_KEYS:
         raise ValueError("Unknown setting")
-    for key in ("concurrency", "queue_limit", "task_daily_limit"):
+    for key in ("account_concurrency", "queue_limit", "task_daily_limit"):
         if key in values and (type(values[key]) is not int or values[key] < (0 if key == "queue_limit" else 1)):
             raise ValueError("Invalid numeric setting")
     if "queue_timeout" in values and (type(values["queue_timeout"]) not in {int, float} or not math.isfinite(values["queue_timeout"]) or values["queue_timeout"] <= 0):
@@ -511,14 +521,12 @@ def apply_settings(runtime, values):
     for key in ("task_window_start", "task_window_end"):
         if key in values and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", str(values[key])):
             raise ValueError("Invalid time window")
-    cfg = replace(runtime.config, **values)
-    if cfg.concurrency > cfg.connections:
-        raise ValueError("Increase HTTP_MAX_CONNECTIONS env before concurrency")
     for key, value in values.items():
         setattr(runtime.config, key, value)
-    runtime.gate.limit = cfg.concurrency
-    runtime.gate.queue_limit = cfg.queue_limit
-    runtime.gate.timeout = cfg.queue_timeout
+    # 每账号并发变化或账号增删都会经 sync_gate 重建全局并发（账号数×每账号并发）。
+    runtime.sync_gate()
+    runtime.gate.queue_limit = runtime.config.queue_limit
+    runtime.gate.timeout = runtime.config.queue_timeout
 
 
 async def management(request):

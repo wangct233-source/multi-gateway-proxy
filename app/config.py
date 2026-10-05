@@ -60,12 +60,10 @@ class GatewayConfig:
     primary: str = ""
     backup: str = ""
     check_url: str = "https://example.com"
-    concurrency: int = 8
+    # 全局并发不再静态配置：闸门 = 启用账号数 × account_concurrency，随账号增删自动伸缩。
     account_concurrency: int = 2
     queue_limit: int = 32
     queue_timeout: float = 15
-    connections: int = 16
-    keepalive: int = 8
     tasks_enabled: bool = False
     task_window_start: str = "00:00"
     task_window_end: str = "23:59"
@@ -105,24 +103,23 @@ class Config:
         gateways = {}
         for gid, (prefix, name) in GATEWAYS.items():
             get = lambda suffix, default="": os.getenv(f"{prefix}_{suffix}", default)
+            mode = get("UPSTREAM_MODE", "disabled")
             item = GatewayConfig(
-                gid, name, prefix, get("UPSTREAM_URL"), get("UPSTREAM_MODE", "disabled"),
-                get("EGRESS_PRIMARY"), get("EGRESS_BACKUP"), get("EGRESS_CHECK_URL", "https://example.com"),
-                int(number(f"{prefix}_CONCURRENCY", 8, 1)),
-                int(number(f"{prefix}_ACCOUNT_CONCURRENCY", 2, 1)),
-                int(number(f"{prefix}_QUEUE_LIMIT", 32)),
-                number(f"{prefix}_QUEUE_TIMEOUT", 15, .001),
-                int(number(f"{prefix}_HTTP_MAX_CONNECTIONS", 16, 1)),
-                int(number(f"{prefix}_HTTP_KEEPALIVE", 8)),
-                boolean(f"{prefix}_TASKS_ENABLED"), get("TASK_WINDOW_START", "00:00"),
-                get("TASK_WINDOW_END", "23:59"), int(number(f"{prefix}_TASK_DAILY_LIMIT", 1, 1)),
-                json.loads(get("ACCOUNTS_JSON", "[]")),
-                [m.strip() for m in get("MODELS").split(",") if m.strip()],
+                gid, name, prefix, upstream_url=get("UPSTREAM_URL"), mode=mode,
+                primary=get("EGRESS_PRIMARY"), backup=get("EGRESS_BACKUP"),
+                check_url=get("EGRESS_CHECK_URL", "https://example.com"),
+                # WorkBuddy(A) 上游按 5 并发/账号为安全基线，其余上游 2。
+                account_concurrency=int(number(f"{prefix}_ACCOUNT_CONCURRENCY", 5 if mode == "a" else 2, 1)),
+                queue_limit=int(number(f"{prefix}_QUEUE_LIMIT", 32)),
+                queue_timeout=number(f"{prefix}_QUEUE_TIMEOUT", 15, .001),
+                tasks_enabled=boolean(f"{prefix}_TASKS_ENABLED"), task_window_start=get("TASK_WINDOW_START", "00:00"),
+                task_window_end=get("TASK_WINDOW_END", "23:59"),
+                task_daily_limit=int(number(f"{prefix}_TASK_DAILY_LIMIT", 1, 1)),
+                accounts=json.loads(get("ACCOUNTS_JSON", "[]")),
+                models=[m.strip() for m in get("MODELS").split(",") if m.strip()],
             )
-            if item.mode not in {"disabled", "openai", "a", "b-remote", "c-anthropic"}:
+            if mode not in {"disabled", "openai", "a", "b-remote", "c-anthropic"}:
                 raise ValueError(f"Invalid {prefix}_UPSTREAM_MODE")
-            if item.connections < item.concurrency or item.keepalive > item.connections:
-                raise ValueError(f"{prefix} connection pool must cover concurrency")
             for window in (item.task_window_start, item.task_window_end):
                 if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", window):
                     raise ValueError(f"Invalid {prefix} task window")

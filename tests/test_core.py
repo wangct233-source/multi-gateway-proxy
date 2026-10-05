@@ -336,6 +336,44 @@ class UnitTests(unittest.IsolatedAsyncioTestCase):
                                              "secret_inline": "tok-2", "enabled": True, "metadata": {}})
             await db.close()
 
+    async def test_dynamic_concurrency_scales_with_accounts(self):
+        # 全局并发 = 启用账号数 × 每账号并发，随账号增删与设置变更自动伸缩。
+        from app.main import Runtime, apply_settings
+        cfg = GatewayConfig("b", "B", "B", mode="openai", account_concurrency=2)
+        gcfg = Config("a" * 24, ("t",), Path("unused.db"), {"b": cfg}, [])
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            db = Database(Path(directory) / "proxy.db")
+            await db.start()
+            repo = Repository(db)
+            await repo.seed({"b": cfg})
+            runtime = Runtime(cfg, gcfg, repo)
+            self.assertEqual(runtime.nominal_limit, 1)  # 未加载账号：下限 1
+            await repo.add_account("b", {"id": "a1", "provider_account_id": "p1",
+                                         "secret_inline": "t1", "enabled": True, "metadata": {}})
+            await repo.add_account("b", {"id": "a2", "provider_account_id": "p2",
+                                         "secret_inline": "t2", "enabled": True, "metadata": {}})
+            await runtime.pool.load()
+            self.assertEqual(runtime.nominal_limit, 4)   # 2 账号 × 2 并发
+            self.assertEqual(runtime.gate.limit, 4)
+            apply_settings(runtime, {"account_concurrency": 5})
+            self.assertEqual(runtime.nominal_limit, 10)  # 2 账号 × 5 并发
+            apply_settings(runtime, {"account_concurrency": 2})
+            await repo.db.write("UPDATE accounts SET enabled=0 WHERE id='a2'")
+            await runtime.pool.load()
+            self.assertEqual(runtime.nominal_limit, 2)   # 1 账号 × 2
+            # 旧设置键 concurrency 已移除：传入必须被拒绝。
+            with self.assertRaises(ValueError):
+                apply_settings(runtime, {"concurrency": 8})
+            await db.close()
+
+    def test_from_env_account_concurrency_default_by_mode(self):
+        # WorkBuddy(A) 模式每账号默认 5；其余模式默认 2。
+        env = {"ADMIN_TOKEN": "x" * 24, "A_CN_UPSTREAM_MODE": "a", "B_UPSTREAM_MODE": "openai"}
+        with patch.dict(os.environ, env):
+            cfg = Config.from_env()
+        self.assertEqual(cfg.gateways["a-cn"].account_concurrency, 5)
+        self.assertEqual(cfg.gateways["b"].account_concurrency, 2)
+
     async def test_b_event_frame_parser(self):
         from app.gateways import b_protocol
 

@@ -34,7 +34,8 @@ class EgressPool:
                     proxy=None if url == "direct://local" else url, trust_env=False, follow_redirects=False,
                     timeout=httpx.Timeout(global_config.stream_idle, connect=global_config.connect_timeout,
                                           pool=config.queue_timeout),
-                    limits=httpx.Limits(max_connections=config.connections, max_keepalive_connections=config.keepalive),
+                    # 连接池给足静态上限：闸门并发=账号数×每账号并发（动态），上限只需"够大"。
+                    limits=httpx.Limits(max_connections=1024, max_keepalive_connections=100),
                 )
             self.exits.append(Exit(role, bool(url), client))
 
