@@ -87,7 +87,7 @@ class Updater:
         return self.flag_dir / self.STATUS_FILE
 
     def running_image(self) -> str:
-        return os.getenv("MGP_IMAGE") or "multi-gateway-proxy:local"
+        return os.getenv("MGP_IMAGE") or "ghcr.io/wangct233-source/multi-gateway-proxy:latest"
 
     def _load(self, path: Path):
         try:

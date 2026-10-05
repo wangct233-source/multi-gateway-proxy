@@ -1,11 +1,11 @@
 services:
   app:
-    # MGP_IMAGE picks the running image (set by the host update script, e.g.
-    # ghcr.io/owner/multi-gateway-proxy:sha-<full-commit>). Unset builds locally.
-    image: ${MGP_IMAGE:-multi-gateway-proxy:local}
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # Pure pull mode: the app always runs a prebuilt image published by GitHub
+    # Actions on every main push. MGP_IMAGE can pin a specific build, e.g.
+    # ghcr.io/wangct233-source/multi-gateway-proxy:sha-<full-commit>.
+    # There is intentionally no build: section — without it Compose can only
+    # pull, so fresh deployments never fail on a missing Dockerfile.
+    image: ${MGP_IMAGE:-ghcr.io/wangct233-source/multi-gateway-proxy:latest}
     init: true
     command: ["python", "-m", "app.supervisor"]
     user: "10001:10001"

@@ -78,7 +78,7 @@ chmod 600 .env
 
 Dockerfile 非 root UID 10001，`/app` 连同 `.git` 属该用户且可写；整容器不设只读 rootfs，因为 supervisor 更新需要可写仓库。仅 data/logs 持久化，镜像内 git 更新在重建/换容器时会丢失，正式部署以构建镜像和提交为基线。
 
-**build 前必须已经 `git init -b main` 并有提交**；源码和 requirements 应由应用工作流提供。缺 `.git`、非 main、无 HEAD 或缺 `app/supervisor.py` 时构建有意失败。已存在仓库先检查分支，不要覆盖现有历史。
+**Compose 为纯拉取模式（无 build 段）**：`up` 只会使用/拉取预构建镜像，不会本地编译。需要自行构建时用 `docker build -t multi-gateway-proxy:local .`（**build 前必须已经 `git init -b main` 并有提交**；缺 `.git`、非 main、无 HEAD 或缺 `app/supervisor.py` 时构建有意失败）。已存在仓库先检查分支，不要覆盖现有历史。
 
 ```bash
 # 只对尚未初始化的新仓库执行；这不是本轮已经执行的操作。
@@ -90,7 +90,7 @@ git commit -m "Prepare multi-gateway deployment"
 git branch --show-current
 git rev-parse --verify HEAD
 # 审查 git status、历史对象、remote URL，确保 .env、密钥、数据库未进入历史。
-docker compose build
+docker compose pull
 docker compose up -d
 # 仅在受控环境检查状态，不输出展开的 secret 配置。
 docker compose ps
