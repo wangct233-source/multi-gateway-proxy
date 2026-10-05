@@ -320,12 +320,14 @@ async def events_to_openai(source, model: str):
                 continue
             if event in _TEXT_EVENTS:
                 text = _message_text(data)
-                if text and text.startswith(snapshot) and len(text) >= len(snapshot):
-                    delta = text[len(snapshot):]
-                    snapshot = text
-                elif text and not snapshot:
-                    delta = text
-                    snapshot = text
+                if text:
+                    if text.startswith(snapshot) and len(text) >= len(snapshot):
+                        delta = text[len(snapshot):]  # 累积快照：计算增量
+                        snapshot = text
+                    else:
+                        # 非前缀帧（上游改发增量片段）：必须输出，否则丢字。
+                        delta = text
+                        snapshot = snapshot + text
                 else:
                     delta = ""
                 if delta:

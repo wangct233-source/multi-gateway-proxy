@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -299,6 +300,41 @@ class UnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"finish_reason":"stop"', text)
         self.assertIn("data: [DONE]", text)
         self.assertIn('"prompt_tokens":8', text)
+
+    async def test_b_event_stream_incremental_frames_not_dropped(self):
+        # 上游若改发增量片段（非累积快照），非前缀帧必须输出而不是丢弃。
+        from app.gateways import b_protocol
+
+        async def source():
+            yield "message", {"message": {"content": "你好"}}
+            yield "message", {"message": {"content": "世界"}}  # 增量片段，非前缀
+            yield "done", {"reason": "stop"}
+
+        chunks = []
+        async for piece in b_protocol.events_to_openai(source(), "doubao"):
+            chunks.append(piece)
+        text = b"".join(chunks).decode()
+        self.assertIn("你好", text)
+        self.assertIn("世界", text)
+        self.assertIn("data: [DONE]", text)
+
+    async def test_account_duplicate_same_gateway_is_integrity_error(self):
+        # 同网关重复 provider_account_id 触发 UNIQUE 约束；导入处理器据此跳过而非 500。
+        from app.main import account_import
+        from app.db import Database, Repository
+        from app.config import GatewayConfig
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            db = Database(Path(directory) / "proxy.db")
+            await db.start()
+            repo = Repository(db)
+            await repo.seed({"b": GatewayConfig("b", "B", "B")})
+            item = {"id": "dup-1", "provider_account_id": "uid-dup",
+                    "secret_inline": "tok-1", "enabled": True, "metadata": {}}
+            await repo.add_account("b", item)
+            with self.assertRaises(sqlite3.IntegrityError):
+                await repo.add_account("b", {"id": "dup-2", "provider_account_id": "uid-dup",
+                                             "secret_inline": "tok-2", "enabled": True, "metadata": {}})
+            await db.close()
 
     async def test_b_event_frame_parser(self):
         from app.gateways import b_protocol

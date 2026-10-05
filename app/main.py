@@ -354,6 +354,7 @@ async def proxy(request: Request):
             session_key = hashlib.sha256(session_key.encode()).hexdigest()
         lease = await runtime.pool.acquire(session_key)
         if not lease:
+            code = 429
             return error(429, "no_account_capacity", "No enabled account with credential and available lease")
         adapter_protocol = getattr(runtime.adapter, "protocol", "")
         # A 模式 token 临近过期（<5min）时提前刷新，避免请求打到上游才吃 401。
@@ -386,7 +387,6 @@ async def proxy(request: Request):
                 outbound = exit.client.build_request("GET", events_url, headers=events_headers)
                 events_response = await exit.client.send(outbound, stream=True)
             code = events_response.status_code
-            await runtime.pool.report(lease, code)
             if events_response.status_code >= 400:
                 raw = await events_response.aread()
                 await events_response.aclose()
@@ -395,12 +395,16 @@ async def proxy(request: Request):
                 return error(502, "upstream_events_failed", "Trae event stream failed", upstream_status=code,
                              detail=raw[:300].decode("utf-8", errors="replace"))
             source = b_protocol.parse_event_frames(events_response)
+            # cleanup 闭包只关闭 response 变量；b-remote 的真实上游响应是
+            # events_response，不指过去的话流式结束后连接永远不会归还池。
+            response = events_response
             if not payload.get("stream"):
                 # 非流式：网关侧消费事件流（有界）合成 OpenAI JSON。
                 try:
                     async with asyncio.timeout(state.config.stream_total):
                         raw = await b_protocol.events_to_single(source, model)
                 except ValueError as exc:
+                    code = 502
                     return error(502, "upstream_stream_failed", str(exc)[:200])
                 finally:
                     await events_response.aclose()
@@ -636,6 +640,10 @@ async def account_import(request):
         except ValueError as exc:
             skipped += 1
             failed.append({"index": index, "reason": str(exc)[:120]})
+        except sqlite3.IntegrityError:
+            # 同网关重复（UNIQUE provider_account_id）：按跳过处理而非 500。
+            skipped += 1
+            failed.append({"index": index, "reason": "duplicate provider_account_id in this gateway"})
     await runtime.pool.load()
     return JSONResponse({"gateway_id": gid, "imported": imported, "skipped": skipped, "errors": failed[:20]})
 
@@ -665,7 +673,11 @@ async def account_login_link(request):
         return error(502, "login_start_failed", "Upstream auth/state failed")
     if not login_state or not auth_url:
         return error(502, "login_start_failed", "Upstream returned no state/authUrl")
-    state.oauth_logins[login_state] = {"gateway": gid, "created": time.time()}
+    # 顺手清掉过期未查询的登录状态，防止管理接口长期使用后无界增长。
+    now = time.time()
+    for stale in [k for k, v in state.oauth_logins.items() if now - v["created"] > 600]:
+        state.oauth_logins.pop(stale, None)
+    state.oauth_logins[login_state] = {"gateway": gid, "created": now}
     return JSONResponse({"state": login_state, "auth_url": auth_url, "expires_in": 600})
 
 
@@ -726,6 +738,8 @@ async def task_run(request):
         return error(404, "not_found", "Unknown task")
     try:
         body = await limited_json(request, 8192)
+        if not isinstance(body, dict) or ("dry_run" in body and type(body["dry_run"]) is not bool):
+            raise ValueError()
         preview = state.tasks.preview(gid, kind, body.get("account_id"))
     except (ValueError, AttributeError):
         return error(400, "invalid_request", "JSON object required")
